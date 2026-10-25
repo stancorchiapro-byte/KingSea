@@ -111,7 +111,7 @@ export async function startServer(opts: { port?: number; store?: Store; quiet?: 
   });
 
   const port = opts.port ?? PORT;
-  await new Promise<void>((r) => http.listen(port, r));
+  await new Promise<void>((r) => http.listen(port, '0.0.0.0', r));
   const actual = (http.address() as { port: number }).port;
   if (!opts.quiet) console.log(`KingSea : serveur prêt sur http://localhost:${actual} (WebSocket /ws, base ${store instanceof MemoryStore ? 'mémoire' : DB})`);
   return {
