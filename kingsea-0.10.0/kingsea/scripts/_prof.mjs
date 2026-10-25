@@ -1,0 +1,25 @@
+import { chromium } from 'playwright';
+import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
+const html = readFileSync(process.argv[2] ?? 'dist-single/kingsea.html');
+const server = createServer((_, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(html); }).listen(0);
+const url = `http://127.0.0.1:${server.address().port}/?debug=1`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+const page = await ctx.newPage();
+const cdp = await ctx.newCDPSession(page);
+const ev = (e) => page.evaluate(e);
+await page.goto(url); await page.waitForFunction(() => window.__ksApp && window.__ksMenu); await sleep(2500);
+await ev(`(() => { const s = window.__ksApp.services; s.data.name = 'P'; s.data.flags['profile.done'] = true; s.data.settings.autoQuality = false; s.applySettings(); window.__ksMenu.layer.buttons.find((b) => b.id === 'play').onTap(); })()`);
+await page.waitForFunction(() => window.__ks?.scene?.floor); await sleep(1000);
+await ev(`window.__ks.scene.loadFloor('${process.argv[3] ?? 'casino'}', true)`); await sleep(1500);
+await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 200 }); await cdp.send('Profiler.start');
+await sleep(4000);
+const { profile } = await cdp.send('Profiler.stop');
+const self = new Map(); const total = profile.samples.length;
+const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+const counts = new Map(); for (const s of profile.samples) counts.set(s, (counts.get(s) ?? 0) + 1);
+for (const [id, c] of counts) { const n = byId.get(id); const k = `${n.callFrame.functionName || '(anon)'} :${n.callFrame.lineNumber}:${n.callFrame.columnNumber}`; self.set(k, (self.get(k) ?? 0) + c); }
+console.log([...self].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([k, c]) => `${(c / total * 100).toFixed(1).padStart(5)}% ${k}`).join('\n'));
+await browser.close(); server.close();

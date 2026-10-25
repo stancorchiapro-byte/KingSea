@@ -1,0 +1,53 @@
+{
+  "name": "kingsea",
+  "version": "0.10.0",
+  "private": true,
+  "description": "KingSea (KS) — jeu social mobile 2D sur un bateau de croisière. Android & iOS via Capacitor.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/build.mjs --serve",
+    "build": "node scripts/build.mjs",
+    "build:single": "node scripts/build.mjs --single",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p server",
+    "test": "node --no-warnings=ExperimentalWarning --import tsx --test tests/*.test.ts",
+    "test:e2e": "node scripts/e2e.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "cap:sync": "npm run build && npx cap sync",
+    "cap:android": "npm run cap:sync && npx cap open android",
+    "cap:ios": "npm run cap:sync && npx cap open ios",
+    "server": "node --no-warnings=ExperimentalWarning --import tsx server/index.ts",
+    "test:server": "node --no-warnings=ExperimentalWarning --import tsx --test tests/server.test.ts",
+    "test:e2e:online": "node scripts/e2e-online.mjs",
+    "audit": "node scripts/build.mjs --single && node scripts/audit.mjs",
+    "bench:net": "node --no-warnings --import tsx scripts/bench-net.ts",
+    "test:e2e:native": "node scripts/e2e-native.mjs",
+    "native:setup": "node scripts/native-setup.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "store:shots": "node scripts/build.mjs --single && node scripts/store-shots.mjs",
+    "build:release": "node scripts/build.mjs && npx cap sync && node scripts/native-setup.mjs",
+    "assets:native": "npx @capacitor/assets generate --iconBackgroundColor \"#0b0a0d\" --iconBackgroundColorDark \"#0b0a0d\" --splashBackgroundColor \"#0b0a0d\" --splashBackgroundColorDark \"#050406\""
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.50.0",
+    "sharp": "^0.34.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/haptics": "^8.0.0",
+    "@capacitor/preferences": "^8.0.0",
+    "@capacitor/splash-screen": "^8.0.0",
+    "@capacitor/status-bar": "^8.0.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-single/
+dev/
+e2e-shots/
+android/
+ios/
+*.log
+server/data/
+audit-shots/
+audit-report.json
+android/key.properties
+*.jks
+*.keystore
