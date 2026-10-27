@@ -26,6 +26,8 @@ export interface Button {
   /** Mise en valeur (élément sélectionné). */
   active?: boolean;
   fontSize?: number;
+  /** Dessin personnalisé (cartes d'objets…) à la place du dessin standard ; l'état enfoncé reste géré. */
+  draw?: (ctx: CanvasRenderingContext2D, b: Button, ui: number) => void;
 }
 
 export function makeButton(partial: Partial<Button> & Pick<Button, 'id' | 'onTap'>): Button {
@@ -85,17 +87,31 @@ export class ButtonLayer implements PointerHandler {
 }
 
 export function drawButton(ctx: CanvasRenderingContext2D, b: Button, ui: number): void {
+  if (b.draw) { ctx.save(); b.draw(ctx, b, ui); ctx.restore(); return; }
   const pressed = !!b.pressed;
   const style: BtnStyle = b.enabled ? b.style : 'disabled';
   ctx.save();
   const y = b.y + (pressed ? 2 : 0);
   if (b.style === 'round') {
     if (!b.enabled) ctx.globalAlpha *= 0.45;
-    const r = Math.min(b.w, b.h) / 2, cx = b.x + b.w / 2, cy = y + b.h / 2;
+    const r0 = Math.min(b.w, b.h) / 2, cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const r = r0 * (pressed ? 0.93 : 1);   // léger enfoncement au toucher
+    // Ombre portée et halo doré quand le bouton est actif
+    ctx.fillStyle = 'rgba(0,0,0,0.32)'; ctx.beginPath(); ctx.arc(cx, cy + 2, r, 0, Math.PI * 2); ctx.fill();
+    if (b.active || pressed) {
+      const hg = ctx.createRadialGradient(cx, cy, r * 0.7, cx, cy, r * 1.35);
+      hg.addColorStop(0, 'rgba(240,210,130,0.28)'); hg.addColorStop(1, 'rgba(240,210,130,0)');
+      ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(cx, cy, r * 1.35, 0, Math.PI * 2); ctx.fill();
+    }
     const g = ctx.createLinearGradient(0, cy - r, 0, cy + r);
-    g.addColorStop(0, pressed ? 'rgba(46,37,48,0.95)' : 'rgba(34,28,36,0.86)'); g.addColorStop(1, pressed ? 'rgba(20,16,22,0.95)' : 'rgba(10,8,12,0.86)');
+    g.addColorStop(0, pressed ? 'rgba(30,58,86,0.97)' : 'rgba(22,40,62,0.9)'); g.addColorStop(1, pressed ? 'rgba(10,22,38,0.97)' : 'rgba(6,14,26,0.9)');
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = b.active ? goldGradient(ctx, cx - r, cy - r, cx + r, cy + r) : 'rgba(212,175,90,0.55)'; ctx.lineWidth = b.active ? 2.5 : 1.4; ctx.stroke();
+    // Reflet nacré en haut
+    const sh = ctx.createLinearGradient(0, cy - r, 0, cy);
+    sh.addColorStop(0, 'rgba(255,255,255,0.16)'); sh.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sh; ctx.beginPath(); ctx.ellipse(cx, cy - r * 0.45, r * 0.72, r * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = b.active || pressed ? goldGradient(ctx, cx - r, cy - r, cx + r, cy + r) : 'rgba(212,175,90,0.6)'; ctx.lineWidth = b.active ? 2.5 : 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
     if (b.icon) b.icon(ctx, cx, cy - (b.label ? r * 0.12 : 0), r * 0.9);
     if (b.label) {
       ctx.fillStyle = PAL.text; ctx.font = font((b.fontSize ?? 11) * ui, 700); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';

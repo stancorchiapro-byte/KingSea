@@ -96,7 +96,8 @@ try {
 
   // Emote d'Alice vue par Bruno
   await A.tapBtn('window.__ks.scene.hud.emoteBtn'); await sleep(300);
-  await A.tapBtn("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'wave')"); await sleep(600);
+  await A.tapBtn("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ecat-social')"); await sleep(250);
+  await A.tapBtn("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'emote-wave')"); await sleep(600);
   const emoteSeen = await B.ev(() => [...window.__ks.scene.presence.remotes.values()][0]?.emote?.e);
   check('Emote : le salut d’Alice apparaît chez Bruno', emoteSeen === 'wave', String(emoteSeen));
 
@@ -111,7 +112,13 @@ try {
   const backendOnline = await A.ev(() => window.__ks.services.backend.online);
   check('Économie : roue du jour tirée et payée par le serveur', isWheel && backendOnline && balWheel > 500, `${balWheel} KSCoins`);
 
-  // Casino en ligne : roulette jouée au doigt, tirage et paiement par le serveur
+  // KS Pass Croisière : sans lui, le serveur refuse les autres ponts ; remis à la réception
+  await A.ev(() => window.__ks.scene.loadFloor('casino', false, 'elevator', { x: 4.5, y: 8.2 })); await sleep(500);
+  const deniedFloor = await A.ev(() => window.__ks.scene.floor.id);
+  const passA = await A.ev(async () => { const r = await window.__ks.services.ask('purser', 'purser', 'gift', {}); return r.ok && window.__ks.services.itemCount('ks-pass') === 1; });
+  const passB = await B.ev(async () => (await window.__ks.services.ask('purser', 'purser', 'gift', {})).ok && window.__ks.services.itemCount('ks-pass') === 1);
+  check('KS Pass Croisière : casino refusé sans le pass, pass remis par la réception (serveur)', deniedFloor === 'hub' && passA && passB, deniedFloor);
+  // Casino en ligne : roulette jouée au doigt à une table multijoueur, tirage et paiement par le serveur
   await A.ev(() => window.__ks.scene.loadFloor('casino', false, 'elevator', { x: 4.5, y: 8.2 }));
   await sleep(700); await A.tapBtn('window.__ks.scene.hud.interactBtn'); await sleep(1300);
   const isRoulette = await A.ev(() => window.__ksGame?.game?.id === 'roulette');
@@ -122,7 +129,8 @@ try {
   check('Caisse en ligne : KSCoins → jetons, validé par le serveur', exOk && ex1[0] === ex0[0] - 200 && ex1[1] === ex0[1] + 200, `${ex0} → ${ex1}`);
   const r0 = await A.ev(() => window.__ks.services.chips.balance);
   // Journal des réponses du serveur (mise, gain, KSCoins de montée de niveau éventuelle)
-  await A.ev(() => { const sv = window.__ks.services; window.__asks = []; const o = sv.ask.bind(sv); sv.ask = async (...x) => { const before = sv.chips.balance; const r = await o(...x); window.__asks.push({ r, before, after: sv.chips.balance }); return r; }; });
+  await A.ev(() => { const sv = window.__ks.services; window.__asks = []; const o = sv.absorb.bind(sv); sv.absorb = (...x) => { const r = o(...x); window.__asks.push({ r }); return r; }; });
+  const atTable = await A.waitFor(() => !!window.__ksGame.table?.state, 4000);
   const redCell = await A.ev(() => { const c = window.__ksGame.game.cells.find((c) => c.kind.type === 'red'); return [c.x + c.w / 2, c.y + c.h / 2]; });
   await A.tap(...redCell);
   await A.tapBtn('window.__ksGame.game.btn.spin');
@@ -134,7 +142,7 @@ try {
   await A.tapBtn('window.__ksGame.quitBtn'); await sleep(500);
   await A.tapBtn("window.__ksGame.modal?.layer.buttons.find((b) => b.label === 'Retour au navire')"); await sleep(1000); // bilan de session
   const L = await A.ev(() => window.__asks.filter((x) => x.r.ok).reduce((a, x) => ({ stake: a.stake + x.r.stake, payout: a.payout + x.r.payout }), { stake: 0, payout: 0 }));
-  check('Casino en ligne : roulette en jetons, tirée et payée par le serveur', isRoulette && L.stake > 0 && L.payout === (red ? L.stake * 2 : 0) && r1 === r0 - L.stake + L.payout, `résultat ${res}, ${r0} → ${r1} jetons (mise ${L.stake}, gain ${L.payout})`);
+  check('Casino en ligne : roulette en jetons à une table (instance serveur), tirée et payée par le serveur', atTable && isRoulette && L.stake > 0 && L.payout === (red ? L.stake * 2 : 0) && r1 === r0 - L.stake + L.payout, `résultat ${res}, ${r0} → ${r1} jetons (mise ${L.stake}, gain ${L.payout})`);
   // Inventaire en ligne : plat emporté au bar, consommé, jauges renvoyées par le serveur
   const inv = await A.ev(async () => { const sv = window.__ks.services; const b = await sv.ask('purser', 'purser', 'buy', { menu: 'hub', id: 'croissant' }); const n1 = sv.itemCount('food.croissant'); const c = await sv.ask('purser', 'purser', 'consume', { item: 'food.croissant' }); return { b: b.ok, n1, c: c.ok, n2: sv.itemCount('food.croissant'), h: sv.eco?.needs.hunger }; });
   check('Inventaire en ligne : achat rangé, consommé une fois, jauges du serveur', inv.b && inv.n1 >= 1 && inv.c && inv.n2 === inv.n1 - 1 && typeof inv.h === 'number', JSON.stringify(inv));
@@ -151,8 +159,48 @@ try {
   const friendsA = await A.ev(() => window.__ks.scene.modal?.data?.friends ?? []);
   const friendsB = await B.ev(() => window.__ks.scene.modal?.data?.friends ?? []);
   await A.page.screenshot({ path: 'e2e-shots/online-04c-amis.png' });
-  check('Amis : code ami, demande, acceptation, statut en ligne des deux côtés', /^KS-[2-9A-Z]{6}$/.test(codeA ?? '') && friendsA[0]?.name === 'Bruno' && friendsA[0]?.online === true && friendsB[0]?.name === 'Alice', `${codeA} · ${friendsA.map((f) => f.name)} / ${friendsB.map((f) => f.name)}`);
+  check('Amis : code ami, demande, acceptation, statut en ligne et avatar des deux côtés', /^KS-[2-9A-Z]{6}$/.test(codeA ?? '') && friendsA[0]?.name === 'Bruno' && friendsA[0]?.online === true && friendsB[0]?.name === 'Alice' && !!friendsA[0]?.look?.skin && !!friendsB[0]?.look?.outfit, `${codeA} · ${friendsA.map((f) => f.name)} / ${friendsB.map((f) => f.name)}`);
   await A.ev(() => window.__ks.scene.modal?.close()); await sleep(200);
+  await B.ev(() => window.__ks.scene.modal?.close()); await sleep(200);
+
+  // Téléphone : message privé d'Alice à Bruno (persisté par le serveur), non-lu chez Bruno
+  const bobId = await B.ev(() => window.__ks.services.data.playerId);
+  const dm = await A.ev(async (id) => window.__ks.scene.phone.send(id, 'Rendez-vous au casino ?'), bobId);
+  const unreadB = await B.waitFor(() => (window.__ks.scene.phone?.unread ?? 0) >= 1, 4000);
+  await B.tapBtn('window.__ks.scene.hud.phoneBtn'); await sleep(700);
+  await B.page.screenshot({ path: 'e2e-shots/online-10-telephone.png' });
+  check('Téléphone : message privé envoyé, reçu et compté comme non lu', dm.ok && unreadB, JSON.stringify(dm));
+  await B.ev(() => window.__ks.scene.modal?.close()); await sleep(200);
+  // Cadeau : 50 KSCoins d'Alice à Bruno (limite glissante de 24 h, opération unique côté serveur)
+  const bb0 = await B.ev(() => window.__ks.services.wallet.balance);
+  const gift = await A.ev(async (id) => { const r = await window.__ks.scene.phone.gift(id, { kind: 'coins', amount: 50 }); return { ok: r.ok, left: r.allowance.coinsLeft }; }, bobId);
+  const gotGift = await B.waitFor((b0) => window.__ks.services.wallet.balance === b0 + 50, 4000, bb0);
+  check('Cadeau entre amis : 50 KSCoins reçus, capacité restante 950 sur 24 h', gift.ok && gift.left === 950 && gotGift, JSON.stringify(gift));
+  // Table partagée : Bruno rejoint la roulette d'Alice ; une manche commune, même numéro pour les deux
+  for (const P of [A, B]) {
+    await P.ev(() => window.__ks.scene.loadFloor('casino', false, 'elevator', { x: 4.5, y: 8.2 })); await sleep(700);
+    await P.tapBtn('window.__ks.scene.hud.interactBtn'); await sleep(1400);
+  }
+  const sameTable = await A.waitFor(() => window.__ksGame?.table?.state?.seats.length === 2, 5000);
+  const tid = await Promise.all([A.ev(() => window.__ksGame.table.state.id), B.ev(() => window.__ksGame.table.state.id)]);
+  const rounds = await Promise.all([
+    A.ev(async () => { await window.__ks.services.ask('purser', 'purser', 'exchange', { dir: 'buy', amount: 20 }); const r = await window.__ksGame.playRound('roulette', 'play', { bets: [{ kind: { type: 'red' }, amount: 10 }] }, 10); return r.ok ? r.view.result : r.error; }),
+    B.ev(async () => { await window.__ks.services.ask('purser', 'purser', 'exchange', { dir: 'buy', amount: 20 }); const r = await window.__ksGame.playRound('roulette', 'play', { bets: [{ kind: { type: 'black' }, amount: 10 }] }, 10); return r.ok ? r.view.result : r.error; }),
+  ]);
+  await A.page.screenshot({ path: 'e2e-shots/online-11-table.png' });
+  check('Table multijoueur : même instance (2/5), un tirage commun pour les deux joueurs', sameTable && tid[0] === tid[1] && typeof rounds[0] === 'number' && rounds[0] === rounds[1], `${tid.join(' / ')} · ${rounds.join(' / ')}`);
+  for (const P of [A, B]) { await P.ev(() => window.__ksGame.quit()); await sleep(600); await P.ev(() => window.__ksGame?.modal?.layer.buttons.find((b) => b.label === 'Retour au navire')?.onTap()); await sleep(1200); }
+  // Visite : Alice sonne chez Bruno, Bruno ouvre, Alice entre dans la cabine de Bruno
+  await B.ev(() => window.__ks.services.net.send({ t: 'cabin' })); await sleep(500);
+  await A.ev((id) => window.__ks.scene.phone.ring(id), bobId);
+  const rang = await B.waitFor(() => window.__ks.scene.modal?.title === 'On sonne à ta porte !', 4000);
+  await B.tapBtn("window.__ks.scene.modal.layer.buttons.find((b) => b.label === 'Ouvrir la porte')");
+  const inside = await A.waitFor((id) => window.__ks.scene.floor.id === 'cabin-interior' && window.__ks.scene.visit?.owner === id, 6000, bobId);
+  await A.page.screenshot({ path: 'e2e-shots/online-12-visite.png' });
+  check('Visite de cabine : sonnette chez l’hôte, porte ouverte, entrée dans la bonne cabine', rang && inside);
+  await A.ev(() => window.__ks.scene.loadFloor('hub', false, 'elevator', { x: 17, y: 6 })); await sleep(800);
+  await B.ev(() => window.__ks.scene.loadFloor('hub', false, 'elevator', { x: 15, y: 6 })); await sleep(800);
+  await B.tapBtn('window.__ks.scene.hud.playersBtn'); await sleep(700);
 
   // Liste des joueurs (onglet « En ligne » du menu Amis), blocage
   await B.tapBtn("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ftab-online')"); await sleep(700);
@@ -234,6 +282,21 @@ try {
   const page404 = await C.page.textContent('h1');
   await C.page.fill('#n', 'Alice'); await C.page.fill('#p', 'nouveau-secret'); await C.page.click('button[type=submit]'); await sleep(800);
   check('Page web de suppression : le compte supprimé n’existe plus', /Supprimer/.test(page404 ?? '') && /incorrect/.test((await C.page.textContent('#msg')) ?? ''));
+
+  // Session refusée pendant une reconnexion (compte supprimé par l'administrateur) : retour au menu avec un
+  // message clair, au lieu d'un « Reconnexion… » sans fin
+  await fetch(`${base}/api/admin/delete`, { method: 'POST', headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Bruno' }) });
+  await B.ev(() => window.__ks.services.net.ws?.close());
+  const bMenu = await B.waitFor(() => window.__ksApp?.game.current === window.__ksMenu, 9000);
+  const bToken = await B.ev(() => localStorage.getItem('kingsea.token'));
+  check('Session refusée à la reconnexion : retour au menu (pas de « Reconnexion… » infini), jeton effacé', bMenu && bToken === null, `menu ${bMenu}`);
+
+  // Icônes du jeu servies par le serveur (onglet, écran d'accueil) : vraies images, pas la page HTML
+  const icon = await fetch(`${base}/icons/apple-touch-icon.png`);
+  const fav = await fetch(`${base}/favicon.ico`);
+  const miss = await fetch(`${base}/icons/inexistant.png`);
+  const man = await (await fetch(`${base}/manifest.webmanifest`)).json();
+  check('Icônes servies en ligne : PNG réels, manifeste, 404 pour une image absente', icon.headers.get('content-type') === 'image/png' && fav.headers.get('content-type') === 'image/png' && miss.status === 404 && man.icons?.length >= 2, `${icon.headers.get('content-type')} / ${miss.status}`);
 
   check('Aucune erreur JavaScript', errors.length === 0, errors.slice(0, 3).join(' | '));
 } catch (e) {

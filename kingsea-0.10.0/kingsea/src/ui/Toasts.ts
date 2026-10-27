@@ -2,7 +2,7 @@
 import { roundRect } from '../art/canvas';
 import { PAL } from '../art/palette';
 import type { Viewport } from '../engine/Viewport';
-import { font } from './UIKit';
+import { font, wrapText } from './UIKit';
 
 type Kind = 'info' | 'success' | 'error' | 'reward';
 interface Toast { text: string; kind: Kind; t: number; dur: number }
@@ -30,14 +30,16 @@ export class Toasts {
       const a = Math.min(1, t.t * 6, (t.dur - t.t) * 3);
       ctx.save(); ctx.globalAlpha = a;
       ctx.font = font(15 * ui, 700);
-      const w = Math.min(vp.width - 40, ctx.measureText(t.text).width + 36 * ui), h = 38 * ui;
+      // Message long sur écran étroit : sur plusieurs lignes plutôt que comprimé
+      const maxW = vp.width - 40, lines = wrapText(ctx, t.text, maxW - 36 * ui);
+      const lh = 19 * ui, w = Math.min(maxW, Math.max(...lines.map((l) => ctx.measureText(l).width)) + 36 * ui), h = 38 * ui + (lines.length - 1) * lh;
       const x = vp.width / 2 - w / 2;
       roundRect(ctx, x, y - (1 - a) * 8, w, h, h / 2);
       ctx.fillStyle = 'rgba(10,8,12,0.92)'; ctx.fill();
       ctx.strokeStyle = t.kind === 'error' ? PAL.danger : t.kind === 'success' ? PAL.success : t.kind === 'reward' ? PAL.gold : 'rgba(239,220,174,0.6)';
       ctx.lineWidth = 1.5; ctx.stroke();
       ctx.fillStyle = PAL.text; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(t.text, vp.width / 2, y + h / 2 - (1 - a) * 8, w - 20);
+      lines.forEach((l, i) => ctx.fillText(l, vp.width / 2, y + h / 2 - (lines.length - 1) * lh / 2 + i * lh - (1 - a) * 8, w - 20));
       ctx.restore();
       y += h + 8 * ui;
     }

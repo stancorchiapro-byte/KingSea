@@ -15,7 +15,7 @@ const PORT = Number(process.env.PORT ?? 8787);
 const DB = process.env.KS_DB ?? join(root, 'server', 'data', 'kingsea.db');
 const ADMIN = process.env.KS_ADMIN_TOKEN ?? '';
 const STATIC = join(root, 'dist');
-const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.map': 'application/json' };
+const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.map': 'application/json', '.webmanifest': 'application/manifest+json', '.ico': 'image/x-icon', '.webp': 'image/webp' };
 
 function clientIp(req: IncomingMessage): string {
   return (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0].trim() ?? req.socket.remoteAddress ?? '?';
@@ -94,10 +94,16 @@ export async function startServer(opts: { port?: number; store?: Store; quiet?: 
     }
     // Fichiers du jeu (dist/) : un téléphone sur le même réseau peut ouvrir http://<ip>:8787
     const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '').replace(/\.\.[/\\]/g, '');
-    let file = join(STATIC, rel || 'index.html');
-    if (!file.startsWith(STATIC) || !existsSync(file) || statSync(file).isDirectory()) file = join(STATIC, 'index.html');
+    // Anciens navigateurs : /favicon.ico demandé d'office → petite icône PNG du jeu
+    let file = join(STATIC, rel === 'favicon.ico' ? 'icons/favicon-32.png' : rel || 'index.html');
+    const missing = !file.startsWith(STATIC) || !existsSync(file) || statSync(file).isDirectory();
+    // Ressource introuvable (image, script…) : vraie erreur 404, jamais la page du jeu à la place
+    // (sinon le navigateur reçoit du HTML pour une icône et l'affiche cassée, sans le signaler)
+    if (missing && extname(rel) && extname(rel) !== '.html') { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('introuvable'); return; }
+    if (missing) file = join(STATIC, 'index.html');
     if (!existsSync(file)) { res.writeHead(404).end('Construire le jeu d’abord : npm run build'); return; }
-    res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-cache' });
+    // Le jeu change à chaque version : pas de cache pour la page et le script ; les icônes peuvent être gardées un jour
+    res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': /\.(png|webp|ico)$/.test(file) ? 'public, max-age=86400' : 'no-cache' });
     createReadStream(file).pipe(res);
   });
 
@@ -111,7 +117,7 @@ export async function startServer(opts: { port?: number; store?: Store; quiet?: 
   });
 
   const port = opts.port ?? PORT;
-  await new Promise<void>((r) => http.listen(port, '0.0.0.0', r));
+  await new Promise<void>((r) => http.listen(port, r));
   const actual = (http.address() as { port: number }).port;
   if (!opts.quiet) console.log(`KingSea : serveur prêt sur http://localhost:${actual} (WebSocket /ws, base ${store instanceof MemoryStore ? 'mémoire' : DB})`);
   return {

@@ -32,7 +32,17 @@ export const NEEDS = {
 export interface PurseState { balance: number; processedTx: string[] }
 export interface Inventory { items: Record<string, number> }
 export interface NeedsState { hunger: number; thirst: number; lastTick: number; coma: { until: number; cause: string } | null }
-export interface EconomyHolder { chips?: PurseState; inventory?: Inventory; needs?: NeedsState }
+/**
+ * Clé de cabine : objet unique (identifiant propre, cabine, propriétaire, nom). La clé principale est personnelle ;
+ * les doubles (serrurier) peuvent être renommés et donnés. `lock` : version de la serrure au moment de la fabrication
+ * (un changement de serrure par le propriétaire rend les anciens doubles inutilisables).
+ */
+export interface KeyItem { uid: string; cabin: string; owner: string; master: boolean; name: string; lock: number }
+/** Serrure de la cabine du joueur : version courante et nombre de doubles fabriqués. */
+export interface Keyring { lock: number; made: number }
+/** Dons envoyés (fenêtre glissante de 24 h) : KSCoins et objets. */
+export interface GiftLogEntry { at: number; kind: 'coins' | 'item'; n: number }
+export interface EconomyHolder { chips?: PurseState; inventory?: Inventory; needs?: NeedsState; keys?: KeyItem[]; keyring?: Keyring; giftLog?: GiftLogEntry[] }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
@@ -55,12 +65,37 @@ export function normalizeEconomy(h: EconomyHolder): void {
   const n = h.needs as Partial<NeedsState> | undefined;
   const coma = isObj(n?.coma) && typeof n!.coma!.until === 'number' ? { until: n!.coma!.until, cause: String(n!.coma!.cause ?? 'faim') } : null;
   h.needs = { hunger: clamp(num(n?.hunger, NEEDS.max), 0, NEEDS.max), thirst: clamp(num(n?.thirst, NEEDS.max), 0, NEEDS.max), lastTick: num(n?.lastTick, 0), coma };
+  normalizeKeys(h);
 }
+
+/** Valide les clés, la serrure et le journal des dons (données abîmées ou anciennes). */
+export function normalizeKeys(h: EconomyHolder): void {
+  const keys: KeyItem[] = [];
+  const seen = new Set<string>();
+  for (const k of Array.isArray(h.keys) ? h.keys : []) {
+    if (!isObj(k) || typeof k.uid !== 'string' || typeof k.cabin !== 'string' || typeof k.owner !== 'string' || seen.has(k.uid)) continue;
+    seen.add(k.uid);
+    keys.push({ uid: k.uid.slice(0, 64), cabin: k.cabin.slice(0, 8), owner: k.owner.slice(0, 64), master: k.master === true, name: typeof k.name === 'string' ? k.name.slice(0, 24) : 'Double de clé', lock: Math.max(1, Math.floor(num(k.lock, 1))) });
+    if (keys.length >= MAX_KEYS) break;
+  }
+  h.keys = keys;
+  const r = h.keyring as Partial<Keyring> | undefined;
+  h.keyring = { lock: Math.max(1, Math.floor(num(r?.lock, 1))), made: Math.max(0, Math.floor(num(r?.made, 0))) };
+  h.giftLog = (Array.isArray(h.giftLog) ? h.giftLog : []).filter((g): g is GiftLogEntry => isObj(g) && typeof g.at === 'number' && (g.kind === 'coins' || g.kind === 'item') && typeof g.n === 'number').slice(-200);
+}
+
+/** Nombre maximal de clés détenues (principale + doubles reçus ou fabriqués). */
+export const MAX_KEYS = 30;
 
 /** Prépare l'économie d'un joueur (appelé avant chaque requête). Les jetons de bienvenue ne sont versés qu'une fois. */
 export function ensureEconomy(s: AuthState): asserts s is AuthState & Required<EconomyHolder> {
   if (!s.chips || !s.inventory || !s.needs) normalizeEconomy(s);
+  if (!s.keys || !s.keyring || !s.giftLog) normalizeKeys(s);
   if (!s.chips!.processedTx.includes('chips:welcome')) chips.earn(s, WELCOME_CHIPS, 'chips:welcome');
+  // Téléphone KS : offert une fois à chaque passager (objet personnel)
+  if (!s.flags['item.phone']) { s.flags['item.phone'] = true; if (!itemCount(s, 'phone')) s.inventory!.items.phone = 1; }
+  // KS Pass Croisière : les passagers qui avaient déjà reçu le cadeau de la réception le reçoivent aussi
+  if (s.flags['gift.received'] && !s.flags['item.ks-pass']) { s.flags['item.ks-pass'] = true; if (!itemCount(s, 'ks-pass')) s.inventory!.items['ks-pass'] = 1; }
 }
 
 // ---------------------------------------------------------------- jetons
@@ -184,11 +219,13 @@ export function wake(s: AuthState, env: AuthEnv): void {
 }
 
 /** Résumé envoyé au téléphone avec chaque réponse. */
-export function economyView(s: AuthState, env?: AuthEnv): { chips: number; inv: Record<string, number>; needs: { hunger: number; thirst: number; coma: number | null; cause: string | null } } {
+export function economyView(s: AuthState, env?: AuthEnv): { chips: number; inv: Record<string, number>; keys: KeyItem[]; lock: number; needs: { hunger: number; thirst: number; coma: number | null; cause: string | null } } {
   const n = s.needs ?? newNeeds();
   return {
     chips: s.chips?.balance ?? 0,
     inv: { ...(s.inventory?.items ?? {}) },
+    keys: (s.keys ?? []).map((k) => ({ ...k })),
+    lock: s.keyring?.lock ?? 1,
     needs: { hunger: Math.round(n.hunger * 10) / 10, thirst: Math.round(n.thirst * 10) / 10, coma: n.coma ? Math.max(0, n.coma.until - (env?.now ?? Date.now())) : null, cause: n.coma?.cause ?? null },
   };
 }

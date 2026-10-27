@@ -8,6 +8,7 @@ import { FURNITURE_BY_ID } from '../data/furniture';
 import { drawOverlay4, drawStatic4, EXTRA_TOP_4, OVERLAY_4 } from './props4';
 import { drawOverlay3, drawStatic3, EXTRA_TOP_3, OVERLAY_3, WALL_PROPS_3 } from './props3';
 import { drawOverlay5, drawStatic5, EXTRA_TOP_5, OVERLAY_5 } from './props5';
+import { drawOverlay6, drawStatic6, EXTRA_TOP_6, OVERLAY_6 } from './props6';
 
 export interface PropVisual { img: AnyCanvas; ox: number; oy: number; w: number; h: number }
 
@@ -22,17 +23,22 @@ const EXTRA_TOP: Partial<Record<PropKind, number>> = {
   barCounter: 0.7, reception: 0.7, sofa: 0.9, plant: 1.3, column: 2.2, engine: 1.2, generator: 0.6, desk: 0.5, crate: 0.4, valve: 0.6, stool: 0.3, coffeeTable: 0.2, logbook: 0.6, compass: 0.2,
 };
 
+/** Hauteur dessinée au-dessus de l'emprise d'un accessoire (en tuiles). */
+export function propExtraTop(kind: PropDef['kind']): number {
+  return EXTRA_TOP[kind] ?? EXTRA_TOP_2[kind] ?? EXTRA_TOP_3[kind] ?? EXTRA_TOP_4[kind] ?? EXTRA_TOP_5[kind] ?? EXTRA_TOP_6[kind] ?? 0;
+}
+
 export function getPropVisual(p: PropDef): PropVisual | null {
   if (CHARACTER_PROPS.has(p.kind)) return null;
   if (p.kind === 'furniture' || p.kind === 'rugFurniture' || p.kind === 'wallFurniture') return furnitureVisual(p);
-  const extra = EXTRA_TOP[p.kind] ?? EXTRA_TOP_2[p.kind] ?? EXTRA_TOP_3[p.kind] ?? EXTRA_TOP_4[p.kind] ?? EXTRA_TOP_5[p.kind] ?? 0;
+  const extra = EXTRA_TOP[p.kind] ?? EXTRA_TOP_2[p.kind] ?? EXTRA_TOP_3[p.kind] ?? EXTRA_TOP_4[p.kind] ?? EXTRA_TOP_5[p.kind] ?? EXTRA_TOP_6[p.kind] ?? 0;
   const w = p.w * TILE, h = (p.h + extra) * TILE;
   const variant = variantOf(p);
   const img = Textures.getOrCreate(`prop:${p.kind}:${p.w}x${p.h}:${variant}`, () => {
     const { canvas, ctx } = makeCanvas(w * ART_SCALE, h * ART_SCALE);
     ctx.scale(ART_SCALE, ART_SCALE);
     ctx.translate(0, extra * TILE); // origine = coin haut-gauche de l'emprise
-    if (!drawStatic2(ctx, p.kind, p.w * TILE, p.h * TILE, variant) && !drawStatic3(ctx, p.kind, p.w * TILE, p.h * TILE, variant) && !drawStatic4(ctx, p.kind, p.w * TILE, p.h * TILE) && !drawStatic5(ctx, p.kind, p.w * TILE, p.h * TILE)) drawStatic(ctx, p.kind, p.w * TILE, p.h * TILE);
+    if (!drawStatic2(ctx, p.kind, p.w * TILE, p.h * TILE, variant) && !drawStatic3(ctx, p.kind, p.w * TILE, p.h * TILE, variant) && !drawStatic4(ctx, p.kind, p.w * TILE, p.h * TILE) && !drawStatic5(ctx, p.kind, p.w * TILE, p.h * TILE) && !drawStatic6(ctx, p.kind, p.w * TILE, p.h * TILE)) drawStatic(ctx, p.kind, p.w * TILE, p.h * TILE);
     return canvas;
   });
   return { img, ox: 0, oy: -extra * TILE, w, h };
@@ -328,6 +334,7 @@ export function drawPropOverlay(ctx: CanvasRenderingContext2D, p: PropDef, s: Pr
   if (OVERLAY_3.has(p.kind)) { drawOverlay3(ctx, p, s.t); return; }
   if (OVERLAY_4.has(p.kind)) { drawOverlay4(ctx, p, s.t, s.lowFx); return; }
   if (OVERLAY_5.has(p.kind)) { drawOverlay5(ctx, p, s.t, s.lowFx); return; }
+  if (OVERLAY_6.has(p.kind)) { drawOverlay6(ctx, p, s.t, s.lowFx); return; }
   const w = p.w * TILE, h = p.h * TILE;
   switch (p.kind) {
     case 'elevator': {
@@ -419,5 +426,5 @@ export function drawPropOverlay(ctx: CanvasRenderingContext2D, p: PropDef, s: Pr
 }
 
 export function hasOverlay(kind: PropKind): boolean {
-  return OVERLAY_2.has(kind) || OVERLAY_3.has(kind) || OVERLAY_4.has(kind) || OVERLAY_5.has(kind) || kind === 'elevator' || kind === 'controlPanel' || kind === 'fan' || kind === 'engine' || kind === 'generator' || kind === 'compass';
+  return OVERLAY_2.has(kind) || OVERLAY_3.has(kind) || OVERLAY_4.has(kind) || OVERLAY_5.has(kind) || OVERLAY_6.has(kind) || kind === 'elevator' || kind === 'controlPanel' || kind === 'fan' || kind === 'engine' || kind === 'generator' || kind === 'compass';
 }

@@ -83,6 +83,41 @@ export class AudioSystem {
     if (this.music && this.ctx?.state !== 'closed') this.music.play(theme);
   }
 
+  // ---------- Moteur de voiture (circuit) : son continu dont la hauteur suit le régime
+  private engine: { o1: OscillatorNode; o2: OscillatorNode; f: BiquadFilterNode; g: GainNode } | null = null;
+  engineStart(): void {
+    const c = this.ctx; if (!c || !this.sfxBus || this.engine) return;
+    const o1 = c.createOscillator(), o2 = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
+    o1.type = 'sawtooth'; o2.type = 'square'; o1.frequency.value = 55; o2.frequency.value = 27.5;
+    f.type = 'lowpass'; f.frequency.value = 600; f.Q.value = 3;
+    g.gain.value = 0.0001;
+    o1.connect(f); o2.connect(f); f.connect(g).connect(this.sfxBus);
+    o1.start(); o2.start();
+    this.engine = { o1, o2, f, g };
+  }
+  /** `rpm` 0..1 (vitesse), `load` 0..1 (accélérateur) ; légère variation pour un son vivant. */
+  engineSet(rpm: number, load: number): void {
+    const e = this.engine, c = this.ctx; if (!e || !c) return;
+    const t = c.currentTime, f0 = 48 + rpm * 150;
+    e.o1.frequency.setTargetAtTime(f0, t, 0.06); e.o2.frequency.setTargetAtTime(f0 / 2 + 1.5, t, 0.06);
+    e.f.frequency.setTargetAtTime(380 + rpm * 1400 + load * 400, t, 0.08);
+    e.g.gain.setTargetAtTime(0.035 + load * 0.05 + rpm * 0.03, t, 0.08);
+  }
+  engineStop(): void {
+    const e = this.engine, c = this.ctx; if (!e || !c) return;
+    this.engine = null;
+    e.g.gain.setTargetAtTime(0.0001, c.currentTime, 0.05);
+    setTimeout(() => { try { e.o1.stop(); e.o2.stop(); e.g.disconnect(); } catch { /* déjà arrêté */ } }, 300);
+  }
+  /** Crissement de pneus (dérapage, virage serré). */
+  skid(strength = 0.5): void { this.noiseHit(0.18, 0.03 + strength * 0.05, 'bandpass', 2400 + strength * 900); }
+  /** Choc contre une barrière ou une bouée. */
+  crash(strength = 0.6): void { this.noiseHit(0.25, 0.1 + strength * 0.12, 'lowpass', 900, 0, 160); this.tone(90, 0.18, 'square', 0.06 + strength * 0.05, 0, 50); }
+  /** Feux de départ (bip court ; aigu au vert). */
+  startBeep(go = false): void { this.tone(go ? 880 : 440, go ? 0.45 : 0.18, 'square', 0.12); }
+  /** Pad d'accélération (vague turbo). */
+  boost(): void { this.noiseHit(0.5, 0.1, 'bandpass', 800, 0, 3200); this.tone(300, 0.4, 'sawtooth', 0.04, 0, 900); }
+
   // ---------- Effets
   private tone(freq: number, dur: number, type: OscillatorType = 'sine', gain = 0.4, delay = 0, slideTo?: number): void {
     const c = this.ctx; if (!c || !this.sfxBus || c.state !== 'running') return;
@@ -115,12 +150,13 @@ export class AudioSystem {
   switchOn(): void { this.tone(140, 0.12, 'square', 0.15); this.tone(90, 0.5, 'sawtooth', 0.08, 0.1, 160); }
   /** Jetons en argile : deux claquements courts et brillants (le second plus doux), comme une pile qu'on pose. */
   chip(): void {
+    if (!this.gate('chip', 30)) return;
     this.noiseHit(0.035, 0.16, 'bandpass', 3400, 0); this.tone(2600, 0.03, 'triangle', 0.05);
     this.noiseHit(0.03, 0.09, 'bandpass', 4200, 0.045); this.tone(3100, 0.025, 'triangle', 0.03, 0.045);
   }
   /** Carte : glissement sur le tapis puis claquement sec. */
-  card(): void { this.noiseHit(0.09, 0.07, 'bandpass', 1800, 0, 4200); this.noiseHit(0.03, 0.12, 'highpass', 3000, 0.07); }
-  tick(): void { this.tone(2400, 0.02, 'square', 0.04); }
+  card(): void { if (!this.gate('card', 40)) return; this.noiseHit(0.09, 0.07, 'bandpass', 1800, 0, 4200); this.noiseHit(0.03, 0.12, 'highpass', 3000, 0.07); }
+  tick(): void { if (!this.gate('tick', 18)) return; this.tone(2400, 0.02, 'square', 0.04); }
   /** Petite fanfare de gain, avec scintillement. */
   win(): void {
     [523, 659, 784, 1046].forEach((f, i) => { this.tone(f, 0.28, 'triangle', 0.15, i * 0.08); this.tone(f * 2, 0.2, 'sine', 0.04, i * 0.08); });
@@ -131,6 +167,50 @@ export class AudioSystem {
     [523, 659, 784, 1046, 784, 1046, 1318].forEach((f, i) => this.tone(f, 0.3, 'triangle', 0.15, i * 0.09));
     for (let i = 0; i < 12; i++) this.tone(1800 + Math.random() * 2400, 0.15, 'sine', 0.03, 0.2 + i * 0.06);
   }
+  /** Évite qu'un même son se superpose à lui-même (ms minimum entre deux déclenchements). */
+  private lastPlay = new Map<string, number>();
+  private gate(name: string, gapMs: number): boolean {
+    const now = performance.now(), last = this.lastPlay.get(name) ?? -1e9;
+    if (now - last < gapMs) return false;
+    this.lastPlay.set(name, now); return true;
+  }
+  /** Mise rendue : deux notes neutres. */
+  push(): void { this.tone(660, 0.14, 'triangle', 0.09); this.tone(660, 0.18, 'sine', 0.05, 0.12); }
+  /** Pluie de jetons/pièces pour les beaux gains (plus longue selon le palier 1–3). */
+  coinShower(tier = 1): void {
+    if (!this.gate('shower', 400)) return;
+    const n = 6 + tier * 6;
+    for (let i = 0; i < n; i++) {
+      const d = 0.15 + i * (0.05 + Math.random() * 0.03);
+      this.tone(2200 + Math.random() * 1800, 0.06, 'triangle', 0.035, d); this.noiseHit(0.025, 0.04, 'bandpass', 3800, d);
+    }
+  }
+  /** Machine à sous : démarrage des rouleaux (moteur qui s'emballe). */
+  reelStart(): void { this.noiseHit(0.35, 0.05, 'bandpass', 500, 0, 1400); this.tone(110, 0.3, 'sawtooth', 0.03, 0, 220); }
+  /** Arrêt d'un rouleau : butée mécanique (le dernier un peu plus appuyé). */
+  reelStop(last = false): void { this.noiseHit(0.06, last ? 0.14 : 0.1, 'lowpass', 700); this.tone(last ? 150 : 190, 0.08, 'square', last ? 0.07 : 0.05); }
+  /** Suspense : note qui monte pendant que le dernier rouleau tourne encore. */
+  anticipation(dur = 1): void { this.tone(330, dur, 'triangle', 0.06, 0, 880); this.tone(495, dur, 'sine', 0.03, 0, 1320); }
+  /** Plinko : la bille touche un picot (note qui monte d'une rangée à l'autre, gamme pentatonique). */
+  plink(row = 0): void { if (!this.gate('plink', 30)) return; const f = [523, 587, 659, 784, 880][row % 5] * (1 + Math.floor(row / 5) * 0.5); this.tone(f, 0.09, 'triangle', 0.07); this.tone(f * 2, 0.05, 'sine', 0.02); }
+  /** Roulette : bille qui rebondit sur un déflecteur ou une case. */
+  ballRattle(strength = 1): void { if (!this.gate('rattle', 45)) return; this.noiseHit(0.03, Math.min(0.12, 0.03 + strength * 0.07), 'bandpass', 3000 + Math.random() * 1500); this.tone(1800 + Math.random() * 900, 0.025, 'triangle', 0.03 * strength); }
+  /** Roulette : bille qui roule sur la piste (souffle continu qui ralentit). */
+  ballRoll(dur = 2.5): void { this.noiseHit(dur, 0.035, 'bandpass', 2200, 0, 900); }
+  /** Dés secoués puis lancés. */
+  diceShake(): void { for (let i = 0; i < 5; i++) this.noiseHit(0.04, 0.06, 'bandpass', 2400 + Math.random() * 800, i * 0.06); }
+  /** Dé qui touche le tapis ou la bande. */
+  diceHit(strength = 1): void { if (!this.gate('dice', 35)) return; this.noiseHit(0.04, Math.min(0.14, 0.04 + strength * 0.08), 'bandpass', 1300 + Math.random() * 500); this.tone(300 + Math.random() * 120, 0.04, 'triangle', 0.04 * strength); }
+  /** Mélange des cartes (battage en queue d'aronde). */
+  shuffle(): void { for (let i = 0; i < 14; i++) this.noiseHit(0.03, 0.05, 'highpass', 2600 + Math.random() * 1200, i * 0.035); }
+  /** Cliquet de roue (roue du jour, roue de fortune). */
+  wheelTick(): void { if (!this.gate('wtick', 25)) return; this.tone(1700, 0.025, 'square', 0.05); this.noiseHit(0.02, 0.05, 'highpass', 4000); }
+  /** Keno : boule qui sort du boulier. */
+  ballPop(): void { this.tone(520, 0.08, 'sine', 0.12, 0, 900); this.noiseHit(0.05, 0.05, 'bandpass', 1800); }
+  /** Crash : le multiplicateur s'arrête net (explosion étouffée). */
+  boom(): void { this.noiseHit(0.6, 0.2, 'lowpass', 1200, 0, 90); this.tone(80, 0.5, 'sine', 0.2, 0, 40); }
+  /** Encaissement réussi (crash, plinko) : caisse enregistreuse discrète. */
+  cashout(): void { this.tone(1568, 0.08, 'triangle', 0.12); this.tone(2093, 0.18, 'sine', 0.1, 0.07); this.noiseHit(0.05, 0.05, 'bandpass', 4200, 0.07); }
   lose(): void { this.tone(330, 0.2, 'triangle', 0.1); this.tone(247, 0.3, 'triangle', 0.08, 0.15); }
   knock(strength = 1): void { this.tone(180 + Math.random() * 120, 0.08, 'square', Math.min(0.18, 0.04 + strength * 0.05)); }
   roll(): void { this.noiseHit(0.6, 0.06, 'lowpass', 400, 0, 200); this.tone(70, 0.6, 'sawtooth', 0.04, 0, 50); }
@@ -222,8 +302,12 @@ export class AudioSystem {
     // Carillons de machines à sous et jetons, au hasard
     this.runSequencer(c, 0.25, (step, time) => {
       const r = Math.random();
-      if (r < 0.06) for (let i = 0; i < 3; i++) this.note(c, g, time + i * 0.07, chimes[(step + i) % 4], 0.3, 'sine', 0.1);
-      else if (r < 0.1) this.note(c, g, time, 1500 + Math.random() * 600, 0.05, 'square', 0.03);
+      if (r < 0.05) for (let i = 0; i < 3; i++) this.note(c, g, time + i * 0.07, chimes[(step + i) % 4], 0.3, 'sine', 0.1);
+      else if (r < 0.08) this.note(c, g, time, 1500 + Math.random() * 600, 0.05, 'square', 0.03);
+      // Jetons qu'on empile au loin (deux claquements secs)
+      else if (r < 0.11) { this.note(c, g, time, 2600 + Math.random() * 500, 0.03, 'triangle', 0.035); this.note(c, g, time + 0.05, 3000 + Math.random() * 500, 0.025, 'triangle', 0.025); }
+      // Bille de roulette qui sautille sur une table voisine
+      else if (r < 0.118) for (let i = 0; i < 5; i++) this.note(c, g, time + i * (0.09 + i * 0.03), 2400 + Math.random() * 800, 0.02, 'triangle', 0.025 * (1 - i * 0.15));
     });
     this.ambStoppers.push(() => g.disconnect());
   }

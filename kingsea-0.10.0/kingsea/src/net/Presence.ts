@@ -3,6 +3,7 @@
 // envoi de sa propre position 10 fois par seconde au plus (uniquement quand elle change).
 import type { Look } from '../art/characters';
 import type { Connection } from './Net';
+import { EMOTE_BY_ID } from '../data/emotes';
 import { MOVE_HZ, unpackPose, type ChatScope, type NetAnim, type NetDir, type PublicPlayer, type ServerMsg } from './protocol';
 
 export interface Remote {
@@ -26,6 +27,10 @@ export interface PresenceEvents {
   onChat(line: ChatLine): void;
   onChatError(msg: string): void;
   onPlayers(list: Array<{ id: string; name: string; floor: string }>): void;
+  /** Entrée dans la cabine d'un autre joueur : aménagement du propriétaire (serveur). */
+  onVisit?(visit: NonNullable<Extract<ServerMsg, { t: 'room' }>['visit']>): void;
+  /** Accès refusé ou visiteur raccompagné : retour au couloir. */
+  onEvict?(msg: string): void;
 }
 
 const INTERP_DELAY = 120;
@@ -37,6 +42,7 @@ export class Presence {
   chat: ChatLine[] = [];
   blocked: Set<string>;
   private floor: string | null = null;
+  private cabin: string | undefined;
   private lastSent = { x: NaN, y: NaN, dir: '', anim: '', at: 0 };
   private sendAcc = 0;
   private off: () => void;
@@ -44,7 +50,7 @@ export class Presence {
   constructor(private conn: Connection, readonly myId: string, private ev: PresenceEvents, private clock: () => number = () => performance.now()) {
     this.blocked = new Set(conn.profile?.blocked ?? []);
     this.off = conn.on((m) => this.onMessage(m));
-    conn.onReconnected = () => { if (this.floor) this.join(this.floor, this.lastSent.x, this.lastSent.y); ev.onReconnected(); };
+    conn.onReconnected = () => { if (this.floor) this.join(this.floor, this.lastSent.x, this.lastSent.y, this.cabin); ev.onReconnected(); };
   }
 
   dispose(): void { this.off(); this.conn.onReconnected = null; }
@@ -52,11 +58,13 @@ export class Presence {
   get online(): boolean { return this.conn.online; }
   get count(): number { return this.remotes.size; }
 
-  join(floor: string, x: number, y: number): void {
+  /** Rejoint un étage ; `cabin` : propriétaire de la cabine visitée (absent : la sienne). */
+  join(floor: string, x: number, y: number, cabin?: string): void {
     this.floor = floor;
+    this.cabin = floor === 'cabin-interior' ? cabin : undefined;
     this.remotes.clear();
     this.lastSent = { x, y, dir: '', anim: '', at: 0 };
-    this.conn.send({ t: 'join', floor, x, y });
+    this.conn.send({ t: 'join', floor, x, y, ...(this.cabin ? { cabin: this.cabin } : {}) });
   }
 
   private add(p: PublicPlayer): void {
@@ -69,7 +77,11 @@ export class Presence {
   private onMessage(m: ServerMsg): void {
     const now = this.clock();
     switch (m.t) {
-      case 'room': this.remotes.clear(); this.byNum.clear(); for (const p of m.players) this.add(p); break;
+      case 'room':
+        this.remotes.clear(); this.byNum.clear(); for (const p of m.players) this.add(p);
+        if (m.visit) this.ev.onVisit?.(m.visit);
+        break;
+      case 'evict': this.cabin = undefined; this.ev.onEvict?.(m.msg); break;
       case 'enter': this.add(m.p); break;
       case 'leave': this.remotes.delete(m.id); break;
       case 'snap':
@@ -83,7 +95,7 @@ export class Presence {
         }
         break;
       case 'look': { const r = this.remotes.get(m.id); if (r) { r.look = m.look; r.name = m.name; } break; }
-      case 'emote': { const r = this.remotes.get(m.id); if (r && !this.blocked.has(m.id)) r.emote = { e: m.e, t: m.e === 'dance' ? 4 : 2.2 }; break; }
+      case 'emote': { const r = this.remotes.get(m.id); if (r && !this.blocked.has(m.id)) r.emote = { e: m.e, t: emoteDuration(m.e) }; break; }
       case 'chat': {
         if (this.blocked.has(m.id)) break;
         const scope = m.scope === 'global' ? 'global' : 'near';
@@ -133,7 +145,7 @@ export class Presence {
     }
   }
 
-  emote(e: 'wave' | 'clap' | 'dance' | 'heart'): void { this.conn.send({ t: 'emote', e }); }
+  emote(e: string): void { this.conn.send({ t: 'emote', e }); }
   say(text: string, scope: ChatScope = 'near'): void { this.conn.send({ t: 'chat', text, scope }); }
   requestPlayers(): void { this.conn.send({ t: 'players' }); }
   block(id: string, on: boolean): void { if (on) this.blocked.add(id); else this.blocked.delete(id); this.conn.send({ t: 'block', id, on }); }
@@ -142,3 +154,6 @@ export class Presence {
   requestCabin(): void { this.conn.send({ t: 'cabin' }); }
   setCabinColor(color: number): void { this.conn.send({ t: 'cabinColor', color }); }
 }
+
+/** Durée d'affichage d'une emote reçue (secondes). */
+export function emoteDuration(id: string): number { return EMOTE_BY_ID.get(id)?.duration ?? 2.2; }

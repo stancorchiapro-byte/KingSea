@@ -5,7 +5,8 @@
 //     que des intentions (« je mise 10 sur le rouge ») et reçoit des résultats.
 import type { Rng } from '../games/logic/rng';
 import type { MissionsState, ProgressState, RoomState } from './progress';
-import type { EconomyHolder } from './economy';
+import type { PassState } from './pass';
+import type { EconomyHolder, KeyItem } from './economy';
 
 export interface Session {
   game: string;
@@ -29,6 +30,8 @@ export interface AuthState extends EconomyHolder {
   progress?: ProgressState;
   missions?: MissionsState;
   room?: RoomState;
+  /** Cabine attribuée (clé principale associée). */
+  cabin?: { id: string | null };
 }
 
 export interface AuthEnv {
@@ -48,12 +51,14 @@ export type AuthReply =
   | { ok: false; error: string; balance: number; eco?: EcoSnapshot };
 
 /** Jetons, inventaire et jauges renvoyés avec chaque réponse (l'autorité fait foi). */
-export interface EcoSnapshot { chips: number; inv: Record<string, number>; needs: { hunger: number; thirst: number; coma: number | null; cause: string | null } }
+export interface EcoSnapshot { chips: number; inv: Record<string, number>; keys?: KeyItem[]; lock?: number; needs: { hunger: number; thirst: number; coma: number | null; cause: string | null } }
 
 /** Progression renvoyée avec chaque réponse : le téléphone l'affiche (XP gagnée, montée de niveau). */
 export interface ProgressSnapshot {
   xp: number; level: number; gainedXp: number; levelUps: number[];
   unlocks: string[]; title: string | null; missions: MissionsState | null;
+  /** Passe de croisière (saison, XP, paliers réclamés). */
+  pass?: PassState;
   /** Cabine (seulement après une action sur la cabine). */
   room?: RoomState;
 }

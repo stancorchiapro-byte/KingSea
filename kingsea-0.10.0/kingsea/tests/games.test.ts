@@ -46,6 +46,8 @@ test('blackjack naturel payé 3:2 + bonus de 50 % de la mise', () => {
 test('le croupier tire jusqu’à 17 et reste sur 17 souple', () => {
   const g = rig([C(10), C(1), C(8), C(6), /* tirage croupier */ C(5)]);
   g.deal(10);
+  assert.equal(g.phase, 'insurance', 'As du croupier : assurance proposée');
+  g.insure(0, false);
   g.stand(); // joueur 18 ; croupier A,6 = 17 souple → reste
   assert.equal(handValue(g.dealer).total, 17);
   assert.equal(g.dealer.length, 2);
@@ -97,6 +99,7 @@ test('séparer une paire : deux mains jouées l’une après l’autre', () => {
 test('croupier avec blackjack : vérifié dès la distribution', () => {
   const g = rig([C(10), C(1), C(9), C(13)]);
   g.deal(10);
+  g.insure(0, false);
   assert.equal(g.phase, 'settled');
   assert.equal(g.hands[0].outcome, 'lose');
 });
@@ -106,6 +109,7 @@ test('simulation : avantage de la maison raisonnable (stratégie simple)', () =>
   let staked = 0, returned = 0;
   for (let i = 0; i < 20000; i++) {
     g.deal(10);
+    if (g.phase === 'insurance') g.insure(0, false);
     while (g.phase === 'player') { if (handValue(g.current!.cards).total < 17) g.hit(); else g.stand(); }
     staked += g.totalStake; returned += g.totalPayout;
   }

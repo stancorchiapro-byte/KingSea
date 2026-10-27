@@ -132,18 +132,47 @@ function carpet(ctx: CanvasRenderingContext2D, x: number, y: number, t: Theme, c
 }
 
 function casinoCarpet(ctx: CanvasRenderingContext2D, x: number, y: number, ch: Ch): void {
-  const px = x * TILE, py = y * TILE;
-  ctx.fillStyle = (x + y) % 2 ? '#0b3646' : '#0a3241'; ctx.fillRect(px, py, TILE, TILE);
-  // Volutes de vagues dorées et perles
-  ctx.strokeStyle = 'rgba(229,181,74,0.32)'; ctx.lineWidth = 1.1;
-  ctx.beginPath(); ctx.arc(px + 16, py + 20, 9, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
-  ctx.beginPath(); ctx.arc(px + 16 + 4, py + 20, 4, Math.PI, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = 'rgba(111,243,255,0.22)'; ctx.beginPath(); ctx.arc(px + 4, py + 4, 1.4, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#e5b54a';
-  if (ch(x, y - 1) !== 'r' && !isSolidChar(ch(x, y - 1))) ctx.fillRect(px, py, TILE, 2);
-  if (ch(x, y + 1) !== 'r' && !isSolidChar(ch(x, y + 1))) ctx.fillRect(px, py + TILE - 2, TILE, 2);
-  if (ch(x - 1, y) !== 'r' && !isSolidChar(ch(x - 1, y))) ctx.fillRect(px, py, 2, TILE);
-  if (ch(x + 1, y) !== 'r' && !isSolidChar(ch(x + 1, y))) ctx.fillRect(px + TILE - 2, py, 2, TILE);
+  // Moquette de casino à motif répété sur 2 × 2 tuiles : treillis de losanges dorés, rosaces bordeaux,
+  // perles aux croisements, fond pétrole légèrement chiné (pré-rendu une fois avec l'étage).
+  const px = x * TILE, py = y * TILE, S = TILE * 2;
+  const ox = px - (x % 2) * TILE, oy = py - (y % 2) * TILE;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(px, py, TILE, TILE); ctx.clip();
+  ctx.fillStyle = '#0a3a47'; ctx.fillRect(px, py, TILE, TILE);
+  // Chiné : petits points déterministes
+  for (let i = 0; i < 10; i++) {
+    const h = ((x * 73856093) ^ (y * 19349663) ^ (i * 83492791)) >>> 0;
+    ctx.fillStyle = h % 3 === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.12)';
+    ctx.fillRect(px + (h % 31), py + ((h >>> 5) % 31), 1, 1);
+  }
+  // Losange central (rempli d'un pétrole plus profond) et son double filet
+  ctx.beginPath(); ctx.moveTo(ox + S / 2, oy + 3); ctx.lineTo(ox + S - 3, oy + S / 2); ctx.lineTo(ox + S / 2, oy + S - 3); ctx.lineTo(ox + 3, oy + S / 2); ctx.closePath();
+  ctx.fillStyle = '#083240'; ctx.fill();
+  ctx.strokeStyle = 'rgba(229,181,74,0.34)'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ox + S / 2, oy + 9); ctx.lineTo(ox + S - 9, oy + S / 2); ctx.lineTo(ox + S / 2, oy + S - 9); ctx.lineTo(ox + 9, oy + S / 2); ctx.closePath();
+  ctx.strokeStyle = 'rgba(160,40,70,0.55)'; ctx.lineWidth = 0.9; ctx.stroke();
+  // Rosace au centre du losange
+  const cx = ox + S / 2, cy = oy + S / 2;
+  ctx.fillStyle = 'rgba(122,31,51,0.85)';
+  for (let k = 0; k < 4; k++) { const a = (k * Math.PI) / 2; ctx.beginPath(); ctx.ellipse(cx + Math.cos(a) * 5, cy + Math.sin(a) * 5, 4.2, 2.2, a, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = 'rgba(229,181,74,0.8)'; ctx.beginPath(); ctx.arc(cx, cy, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(229,181,74,0.35)'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.stroke();
+  // Perles aux croisements du treillis (coins de la cellule)
+  for (const [qx, qy] of [[ox, oy], [ox + S, oy], [ox, oy + S], [ox + S, oy + S]]) {
+    ctx.fillStyle = 'rgba(239,220,174,0.55)'; ctx.beginPath(); ctx.arc(qx, qy, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(111,243,255,0.18)'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(qx, qy, 5, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.restore();
+  // Bordure dorée de la moquette (double filet)
+  const edge = (cond: boolean, fx: number, fy: number, fw: number, fh: number, ix: number, iy: number, iw: number, ih: number) => {
+    if (!cond) return;
+    ctx.fillStyle = '#e5b54a'; ctx.fillRect(fx, fy, fw, fh);
+    ctx.fillStyle = 'rgba(229,181,74,0.45)'; ctx.fillRect(ix, iy, iw, ih);
+  };
+  edge(ch(x, y - 1) !== 'r' && !isSolidChar(ch(x, y - 1)), px, py, TILE, 2, px, py + 4, TILE, 0.8);
+  edge(ch(x, y + 1) !== 'r' && !isSolidChar(ch(x, y + 1)), px, py + TILE - 2, TILE, 2, px, py + TILE - 4.8, TILE, 0.8);
+  edge(ch(x - 1, y) !== 'r' && !isSolidChar(ch(x - 1, y)), px, py, 2, TILE, px + 4, py, 0.8, TILE);
+  edge(ch(x + 1, y) !== 'r' && !isSolidChar(ch(x + 1, y)), px + TILE - 2, py, 2, TILE, px + TILE - 4.8, py, 0.8, TILE);
 }
 
 function neonFloor(ctx: CanvasRenderingContext2D, x: number, y: number): void {

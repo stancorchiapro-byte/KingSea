@@ -6,6 +6,7 @@ import { PAL } from '../art/palette';
 import type { Viewport } from '../engine/Viewport';
 import type { Connection } from '../net/Net';
 import type { FriendEntry, FriendsData, ServerMsg } from '../net/protocol';
+import { drawAvatar } from './avatar';
 import type { Services } from '../systems/Services';
 import { InfoDialog, Modal } from './Modal';
 import { promptText } from './TextPrompt';
@@ -145,14 +146,16 @@ export class FriendsMenu extends Modal {
     ctx.fillText(this.data?.code ?? '…', C.x, C.y + 34 * ui, C.w - 170 * ui);
     for (const r of this.rows) {
       const e = r.e;
-      ctx.fillStyle = e.online ? PAL.success : 'rgba(255,255,255,0.25)';
-      ctx.beginPath(); ctx.arc(C.x + 6 * ui, r.y - 7 * ui, 4.5 * ui, 0, Math.PI * 2); ctx.fill();
+      // Avatar (apparence du joueur) avec pastille en ligne / hors ligne
+      const ar = 17 * ui, tx = C.x + ar * 2 + 10 * ui;
+      drawAvatar(ctx, e.look, e.name, C.x + ar, r.y + 2 * ui, ar, r.kind === 'friend' ? e.online : undefined);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillStyle = PAL.text; ctx.font = font(15 * ui, 800);
-      const maxW = C.w * 0.42;
-      ctx.fillText(e.name, C.x + 18 * ui, r.y - 7 * ui, maxW);
+      const maxW = C.w * 0.42 - ar * 2 - 10 * ui;
+      ctx.fillText(e.name, tx, r.y - 7 * ui, maxW);
       ctx.fillStyle = PAL.textDim; ctx.font = font(11.5 * ui, 600);
       const sub = r.kind === 'in' ? 'Veut devenir ton ami' : r.kind === 'out' ? 'Demande envoyée' : e.online ? `${FLOOR_NAMES[e.floor ?? ''] ?? 'À bord'} · niv. ${e.level}` : `Hors ligne · niv. ${e.level}`;
-      ctx.fillText(sub, C.x + 18 * ui, r.y + 11 * ui, maxW);
+      ctx.fillText(sub, tx, r.y + 11 * ui, maxW);
     }
     const listEmpty = !this.rows.length && this.data;
     if (listEmpty) {

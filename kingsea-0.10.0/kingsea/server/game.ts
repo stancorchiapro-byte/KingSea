@@ -3,10 +3,12 @@
 // Indépendant du transport : index.ts y branche des WebSockets, les tests des sockets factices.
 import { randomInt } from 'node:crypto';
 import { DEFAULT_LOOK, enforceUnlocks, sanitizeLook } from '../src/art/characters';
-import { abandonSession, activeSessions, ensureEconomy, ensureProgress, handle, missionEvent, parseRequest, refreshMissions, type AuthReply } from '../src/authority';
+import { abandonSession, activeSessions, ensureEconomy, ensureMasterKey, ensureProgress, floorAccess, giftAllowance, giveGift, handle, keyOpens, missionEvent, parseRequest, refreshMissions, transact, type AuthReply, type AuthState } from '../src/authority';
+import { EMOTE_BY_ID, emoteUnlocked } from '../src/data/emotes';
+import { TableManager } from './tables';
 import { GAME_LABELS } from '../src/games/logic/pending';
 import { dayKey } from '../src/games/logic/rng';
-import { CHAT_NEAR_RADIUS, GLOBAL_CHAT_COOLDOWN, GLOBAL_CHAT_LEVEL, MAX_FRIENDS, MAX_PENDING, NET_ANIMS, type FriendEntry, type FriendsData, packPose, PROTOCOL_VERSION, TERMS_VERSION, type ChatScope, type ClientMsg, type NetAnim, type NetDir, type OwnProfile, type PublicPlayer, type ServerMsg } from '../src/net/protocol';
+import { CHAT_NEAR_RADIUS, DM_MAX, GLOBAL_CHAT_COOLDOWN, GLOBAL_CHAT_LEVEL, MAX_FRIENDS, MAX_PENDING, NET_ANIMS, type DmConversation, type DmMessage, type GiftAllowanceInfo, type FriendEntry, type FriendsData, packPose, PROTOCOL_VERSION, TERMS_VERSION, type ChatScope, type ClientMsg, type NetAnim, type NetDir, type OwnProfile, type PublicPlayer, type ServerMsg } from '../src/net/protocol';
 import { CabinRegistry, CABIN_IDS } from '../src/systems/Cabins';
 import { STARTING_COINS } from '../src/systems/PlayerData';
 import { getFloor } from '../src/world/floors';
@@ -36,14 +38,27 @@ interface Client {
   blocked: Set<string>;
   /** Numéro court pour les instantanés (unique sur le serveur). */
   num: number;
+  /** Cabine visitée (propriétaire) quand le joueur est chez quelqu'un. */
+  visiting: string | null;
+  dm: ChatLimiter;
 }
 
-/** « jusqu'au 23/10 à 21:40 » (heure du serveur). */
-function until(t: number): string {
-  if (t > Date.now() + 5 * 365 * 86_400_000) return 'définitivement';
-  const d = new Date(t), p = (n: number) => String(n).padStart(2, '0');
-  return `jusqu’au ${p(d.getDate())}/${p(d.getMonth() + 1)} à ${p(d.getHours())}:${p(d.getMinutes())}`;
+/** Durée restante d'une sanction (« encore 2 h 15 min ») : aucune heure d'horloge n'est affichée dans le jeu. */
+export function until(t: number, now: number = Date.now()): string {
+  if (t > now + 5 * 365 * 86_400_000) return 'définitivement';
+  const min = Math.max(1, Math.ceil((t - now) / 60_000));
+  if (min < 60) return `pour encore ${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 48) return `pour encore ${h} h${m ? ` ${m} min` : ''}`;
+  return `pour encore ${Math.ceil(h / 24)} jours`;
 }
+
+/** Délai de validité d'une invitation acceptée (le visiteur doit entrer avant). */
+export const VISIT_PERMIT_MS = 5 * 60_000;
+/** Délai de réponse à un coup de sonnette. */
+export const VISIT_RING_MS = 60_000;
+const NICK_RE = /^[\p{L}\p{N} '’._-]{1,20}$/u;
+const TX_RE = /^[\w:.-]{6,48}$/;
 
 const DIRS: NetDir[] = ['down', 'up', 'left', 'right'];
 const ABANDON_DELAY = 60_000;
@@ -67,6 +82,16 @@ export class GameServer {
   private reportLimiter = new RateLimiter(5, 600_000);
   private friendLimiter = new RateLimiter(10, 60_000);
   private timers: Array<ReturnType<typeof setInterval>> = [];
+  private dmLimiter = new RateLimiter(30, 60_000);
+  private giftLimiter = new RateLimiter(12, 60_000);
+  private ringLimiter = new RateLimiter(6, 60_000);
+  private tableLimiter = new RateLimiter(40, 10_000);
+  /** Sonnettes en attente (`visiteur>propriétaire` → échéance) et invitations acceptées (`propriétaire|visiteur`). */
+  private rings = new Map<string, number>();
+  private permits = new Map<string, number>();
+  /** Réponses déjà envoyées aux dons (rejeu d'un même identifiant de transaction). */
+  private giftReplies = new Map<string, Extract<ServerMsg, { t: 'giftResult' }>>();
+  readonly tables: TableManager;
   readonly now: () => number;
   private rng: () => number;
   readonly name: string;
@@ -76,11 +101,36 @@ export class GameServer {
     this.rng = opts.rng ?? (() => randomInt(0, 2 ** 32) / 2 ** 32);
     this.name = opts.name ?? 'KingSea';
     for (const [cabin, account] of store.cabinOwners()) this.cabins.restore(account, cabin);
+    this.tables = new TableManager({
+      env: (seed) => ({ ...this.env(), seed, online: true }),
+      withProfile: (id, fn) => this.withProfile(id, fn),
+      send: (id, m) => { const o = this.byAccount.get(id); if (o) this.send(o, m); },
+      friendsOf: (id) => this.store.friends(id).map((f) => f.id),
+      identity: (id) => { const pr = this.byAccount.get(id)?.profile ?? null; return pr ? { name: pr.name, look: sanitizeLook(pr.look), level: pr.progress?.level ?? 1 } : this.offlineIdentity(id); },
+    }, this.now);
+  }
+
+  private idCache = new Map<string, { name: string; look: ReturnType<typeof sanitizeLook>; level: number }>();
+  private offlineIdentity(id: string) {
+    let v = this.idCache.get(id);
+    if (!v) { const pr = this.store.profile(id); if (!pr) return null; v = { name: pr.name, look: sanitizeLook(pr.look), level: pr.progress?.level ?? 1 }; this.idCache.set(id, v); if (this.idCache.size > 500) this.idCache.delete(this.idCache.keys().next().value as string); }
+    return v;
+  }
+
+  /** Exécute `fn` sur le profil d'un joueur (connecté : profil vivant ; sinon chargé puis enregistré). */
+  withProfile<T>(id: string, fn: (p: AuthState) => T): T | null {
+    const live = this.byAccount.get(id)?.profile;
+    const p = live ?? this.store.profile(id);
+    if (!p) return null;
+    const r = fn(p);
+    this.store.save(p);
+    return r;
   }
 
   start(): void {
     this.timers.push(setInterval(() => this.broadcastSnapshots(), 100));
     this.timers.push(setInterval(() => this.reapIdle(), 5000));
+    this.timers.push(setInterval(() => this.tables.tick(), 100));
     // Signalements conservés 12 mois au plus (politique de confidentialité)
     const purge = () => this.store.purgeReports(this.now() - REPORT_RETENTION);
     purge(); this.timers.push(setInterval(purge, 6 * 3600_000));
@@ -90,6 +140,8 @@ export class GameServer {
     for (const t of this.timers) clearInterval(t);
     for (const t of this.abandonTimers.values()) clearTimeout(t);
     this.timers = [];
+    // Manches de table pas encore tirées : mises rendues avant l'arrêt
+    this.tables.shutdown();
     for (const c of [...this.clients]) c.sock.close(1001, 'arrêt du serveur');
   }
 
@@ -97,7 +149,7 @@ export class GameServer {
 
   // ---------------------------------------------------------------- connexions
   connect(sock: Sock): Client {
-    const c: Client = { sock, profile: null, token: null, room: null, floor: null, pos: { x: 0, y: 0, t: this.now(), dir: 'down', anim: 'idle' }, moved: false, chat: new ChatLimiter(), replies: new Map(), lastSeen: this.now(), lastEmote: 0, lastGlobal: 0, blocked: new Set(), num: ++this.numSeq };
+    const c: Client = { sock, profile: null, token: null, room: null, floor: null, pos: { x: 0, y: 0, t: this.now(), dir: 'down', anim: 'idle' }, moved: false, chat: new ChatLimiter(), replies: new Map(), lastSeen: this.now(), lastEmote: 0, lastGlobal: 0, blocked: new Set(), num: ++this.numSeq, visiting: null, dm: new ChatLimiter() };
     this.clients.add(c);
     return c;
   }
@@ -108,7 +160,10 @@ export class GameServer {
     this.leaveRoom(c);
     const p = c.profile;
     if (p && this.byAccount.get(p.id) === c) {
+      // Table du casino : la place est libérée (mises non distribuées rendues, main en cours jouée selon la règle)
+      this.tables.disconnect(p.id);
       this.byAccount.delete(p.id);
+      this.evictVisitors(p.id, 'Ton hôte a quitté le navire : retour au couloir des cabines.');
       this.store.save(p);
       // Les amis connectés voient le changement de statut
       for (const f of this.store.friends(p.id)) this.pushFriends(f.id);
@@ -176,17 +231,20 @@ export class GameServer {
         if (c.room) this.toRoom(c.room, { t: 'look', id: p.id, look: p.look, name: p.name });
         return;
       }
-      case 'join': return this.join(c, m.floor, m.x, m.y);
+      case 'join': return this.join(c, m.floor, m.x, m.y, m.cabin);
       case 'move': return this.move(c, m);
       case 'emote': {
-        if (!c.room || !['wave', 'clap', 'dance', 'heart'].includes(m.e) || this.now() - c.lastEmote < 800) return;
+        if (!c.room || typeof m.e !== 'string' || !EMOTE_BY_ID.has(m.e) || this.now() - c.lastEmote < 800) return;
+        ensureProgress(p);
+        // Emotes de niveau ou du pass : seulement celles débloquées par le joueur
+        if (!emoteUnlocked(m.e, p.progress!.unlocks)) { this.send(c, { t: 'notice', msg: 'Emote pas encore débloquée.' }); return; }
         c.lastEmote = this.now();
         this.toRoom(c.room, { t: 'emote', id: p.id, e: m.e }, c, p.id);
         return;
       }
       case 'chat': {
         const sc = this.store.sanction(p.id);
-        if (sc && sc.muteUntil > this.now()) { this.send(c, { t: 'chatError', msg: `Chat suspendu par la modération ${until(sc.muteUntil)}.` }); return; }
+        if (sc && sc.muteUntil > this.now()) { this.send(c, { t: 'chatError', msg: `Chat suspendu par la modération ${until(sc.muteUntil, this.now())}.` }); return; }
         const scope: ChatScope = m.scope === 'global' ? 'global' : 'near';
         if (scope === 'near' && !c.room) return;
         if (scope === 'global') {
@@ -224,6 +282,8 @@ export class GameServer {
         const reply = handle(p, req, { ...this.env(), seed: p.id, online: true });
         this.store.save(p);
         c.replies.set(req.id, reply);
+        // Machines (banc partagé) : les voisins voient le résultat, jamais la mise d'avant tirage
+        if (reply.ok && req.kind === 'casino' && reply.done && reply.stake + reply.payout > 0) this.tables.personalResult(p.id, req.game, reply.payout - reply.stake, GAME_LABELS[req.game] ?? req.game);
         if (c.replies.size > 60) c.replies.delete(c.replies.keys().next().value as string);
         this.send(c, { t: 'res', id: req.id, reply });
         return;
@@ -233,7 +293,7 @@ export class GameServer {
         if (!id) {
           id = this.cabins.assign(p.id);
           if (id && !this.store.setCabin(id, p.id)) { this.cabins.release(p.id); id = null; }
-          if (id) { p.cabin.id = id; this.store.save(p); }
+          if (id) { p.cabin.id = id; ensureMasterKey(p, p.id); this.store.save(p); }
         }
         this.send(c, { t: 'cabin', id, wallColor: p.cabin.wallColor });
         return;
@@ -244,7 +304,7 @@ export class GameServer {
         return;
       }
       case 'players': {
-        const list = [...this.byAccount.values()].filter((x) => x.profile).map((x) => ({ id: x.profile!.id, name: x.profile!.name, floor: x.floor ?? 'hub' }));
+        const list = [...this.byAccount.values()].filter((x) => x.profile).map((x) => ({ id: x.profile!.id, name: x.profile!.name, floor: x.floor ?? 'hub', look: sanitizeLook(x.profile!.look) }));
         this.send(c, { t: 'players', list });
         return;
       }
@@ -314,7 +374,245 @@ export class GameServer {
         this.send(c, { t: 'notice', msg: `Signalement de ${target.name} envoyé à la modération. Merci.` });
         return;
       }
+      // ---------------------------------------------------------------- tables du casino
+      case 'tableJoin': {
+        if (typeof m.game !== 'string' || !TableManager.known(m.game)) { this.send(c, { t: 'tableError', msg: 'Jeu inconnu' }); return; }
+        if (!this.tableLimiter.allow(`j:${p.id}`, this.now())) return;
+        const r = this.tables.join(p.id, m.game, { tier: m.tier, instance: m.instance, friend: m.friend });
+        if (!r.ok) { this.send(c, { t: 'tableError', msg: r.msg }); return; }
+        if (r.note) this.send(c, { t: 'notice', msg: r.note });
+        return;
+      }
+      case 'tableLeave': this.tables.leave(p.id); this.send(c, { t: 'tableLeft' }); return;
+      case 'tableList': {
+        if (typeof m.game !== 'string' || !TableManager.known(m.game)) return;
+        this.send(c, { t: 'tableList', game: m.game, tables: this.tables.list(m.game, p.id, typeof m.tier === 'string' ? m.tier : null), friends: this.tables.friendsTables(p.id) });
+        return;
+      }
+      case 'tableBet': case 'tableAct': {
+        if (typeof m.id !== 'string' || !TX_RE.test(m.id)) return;
+        const cached = c.replies.get(m.id);
+        if (cached) { this.send(c, { t: 'res', id: m.id, reply: cached }); return; }
+        if (!this.tableLimiter.allow(p.id, this.now())) { this.send(c, { t: 'res', id: m.id, reply: { ok: false, error: 'Trop d’actions : un instant', balance: p.wallet.balance } }); return; }
+        const reply = m.t === 'tableBet' ? this.tables.bet(p.id, m.bet, m.id) : this.tables.act(p.id, m.act, m.id);
+        if (!reply.ok && !reply.balance) (reply as { balance: number }).balance = p.wallet.balance;
+        this.store.save(p);
+        c.replies.set(m.id, reply);
+        if (c.replies.size > 60) c.replies.delete(c.replies.keys().next().value as string);
+        this.send(c, { t: 'res', id: m.id, reply });
+        return;
+      }
+      // ---------------------------------------------------------------- téléphone : messages privés
+      case 'dmList': this.sendDmList(c); return;
+      case 'dmHistory': {
+        if (typeof m.with !== 'string') return;
+        const before = typeof m.before === 'number' && Number.isInteger(m.before) ? m.before : null;
+        const rows = this.store.messages(p.id, m.with, before, 41);
+        const more = rows.length > 40;
+        this.send(c, { t: 'dmHistory', with: m.with, msgs: rows.slice(more ? 1 : 0).map((x) => ({ ...x })), more });
+        return;
+      }
+      case 'dmSend': return this.dmSend(c, m.to, m.text, typeof m.nonce === 'string' ? m.nonce.slice(0, 40) : undefined);
+      case 'dmRead': {
+        if (typeof m.with !== 'string') return;
+        this.store.markRead(p.id, m.with);
+        this.sendDmList(c);
+        return;
+      }
+      case 'dmDelete': {
+        if (typeof m.with !== 'string') return;
+        this.store.clearConversation(p.id, m.with);
+        this.sendDmList(c);
+        return;
+      }
+      case 'contact': {
+        if (typeof m.id !== 'string' || m.id === p.id || !this.store.friends(p.id).some((f) => f.id === m.id)) { this.send(c, { t: 'notice', msg: 'Seuls tes amis peuvent être enregistrés comme contacts.' }); return; }
+        const cur = this.store.contacts(p.id).find((x) => x.id === m.id);
+        let nick = cur?.nick ?? null;
+        if (m.nick !== undefined) {
+          const t = typeof m.nick === 'string' ? m.nick.replace(/\s+/g, ' ').trim() : '';
+          if (t && !NICK_RE.test(t)) { this.send(c, { t: 'notice', msg: 'Surnom invalide (1 à 20 lettres ou chiffres).' }); return; }
+          nick = t ? cleanMessage(t).slice(0, 20) : null;
+        }
+        const fav = typeof m.fav === 'boolean' ? m.fav : cur?.fav ?? false;
+        this.store.setContact(p.id, m.id, nick, fav);
+        this.send(c, { t: 'contacts', list: this.store.contacts(p.id) });
+        this.sendDmList(c);
+        return;
+      }
+      // ---------------------------------------------------------------- dons entre amis
+      case 'gift': return this.gift(c, m.to, m.gift, m.tx);
+      case 'giftInfo': {
+        const names = new Map<string, string>();
+        const nameOf = (id: string) => { if (!names.has(id)) names.set(id, id === 'compte-supprimé' ? 'compte supprimé' : this.offlineIdentity(id)?.name ?? '?'); return names.get(id)!; };
+        const history = this.store.transfers(p.id, 30).map((t) => ({ id: t.id, from: t.from, to: t.to, fromName: nameOf(t.from), toName: nameOf(t.to), kind: t.kind, amount: t.amount, item: t.item, label: t.label, at: t.at }));
+        this.send(c, { t: 'giftInfo', allowance: this.allowance(p), history });
+        return;
+      }
+      // ---------------------------------------------------------------- visites de cabine
+      case 'visitAsk': return this.visitAsk(c, m.to);
+      case 'visitAnswer': {
+        if (typeof m.from !== 'string') return;
+        const key = `${m.from}>${p.id}`, due = this.rings.get(key);
+        this.rings.delete(key);
+        const v = this.byAccount.get(m.from);
+        if (!due || due < this.now()) { this.send(c, { t: 'notice', msg: 'Ce coup de sonnette a expiré.' }); return; }
+        if (!m.accept) { if (v) this.send(v, { t: 'visitReply', ok: false, msg: `${p.name} ne peut pas te recevoir pour le moment.` }); return; }
+        if (!v) { this.send(c, { t: 'notice', msg: 'Ton visiteur s’est déconnecté.' }); return; }
+        this.permits.set(`${p.id}|${m.from}`, this.now() + VISIT_PERMIT_MS);
+        this.send(v, { t: 'visitReply', ok: true, msg: `${p.name} t’ouvre la porte : bienvenue !`, owner: p.id });
+        this.send(c, { t: 'notice', msg: `${v.profile?.name ?? 'Ton visiteur'} arrive.` });
+        return;
+      }
+      case 'visitKick': {
+        if (typeof m.id !== 'string' || !p.cabin.id) return;
+        const v = this.byAccount.get(m.id);
+        this.permits.delete(`${p.id}|${m.id}`);
+        if (v && v.visiting === p.id) { this.send(v, { t: 'evict', msg: `${p.name} t’a raccompagné à la porte.` }); this.leaveRoom(v); }
+        this.sendVisitors(p.id);
+        return;
+      }
+      case 'door': {
+        p.flags['cabin.closed'] = m.open === false;
+        if (!m.open) { for (const k of [...this.permits.keys()]) if (k.startsWith(`${p.id}|`)) this.permits.delete(k); this.evictVisitors(p.id, `${p.name} a fermé sa porte à clé.`); }
+        this.store.save(p);
+        this.sendVisitors(p.id);
+        return;
+      }
     }
+  }
+
+  // ---------------------------------------------------------------- téléphone
+  private isFriend(a: string, b: string): boolean { return this.store.friends(a).some((f) => f.id === b); }
+  private blockedEither(a: string, b: string): boolean { return this.store.blocks(a).includes(b) || this.store.blocks(b).includes(a); }
+
+  private dmConversations(id: string): { convs: DmConversation[]; unread: number } {
+    const contacts = new Map(this.store.contacts(id).map((x) => [x.id, x]));
+    const convs: DmConversation[] = this.store.conversations(id).map((x) => {
+      const who = this.byAccount.get(x.with)?.profile ?? null;
+      const ident = who ? { name: who.name, look: sanitizeLook(who.look) } : this.offlineIdentity(x.with);
+      const ct = contacts.get(x.with);
+      return { with: x.with, name: ident?.name ?? 'compte supprimé', look: ident?.look, online: !!who, last: x.last as DmMessage, unread: x.unread, nick: ct?.nick ?? null, fav: ct?.fav ?? false };
+    });
+    return { convs, unread: convs.reduce((a, x) => a + x.unread, 0) };
+  }
+  private sendDmList(c: Client): void { if (c.profile) this.send(c, { t: 'dmList', ...this.dmConversations(c.profile.id) }); }
+
+  private dmSend(c: Client, to: unknown, text: unknown, nonce?: string): void {
+    const p = c.profile!;
+    const err = (msg: string) => this.send(c, { t: 'dmError', msg, nonce });
+    if (typeof to !== 'string' || to === p.id) return err('Destinataire invalide');
+    if (!this.isFriend(p.id, to)) return err('Les messages privés sont réservés à tes amis.');
+    if (this.blockedEither(p.id, to)) return err('Impossible d’écrire à ce joueur.');
+    const sc = this.store.sanction(p.id);
+    if (sc && sc.muteUntil > this.now()) return err(`Messages suspendus par la modération ${until(sc.muteUntil, this.now())}.`);
+    if (!this.dmLimiter.allow(p.id, this.now())) return err('Trop de messages : patiente une minute.');
+    if (typeof text !== 'string' || text.length > DM_MAX * 2) return err('Message trop long');
+    const r = c.dm.check(text.slice(0, DM_MAX), this.now());
+    if (!r.ok) return err(r.reason);
+    const row = this.store.addMessage(p.id, to, r.text, this.now());
+    this.send(c, { t: 'dm', msg: row, nonce, name: p.name });
+    const o = this.byAccount.get(to);
+    if (o) this.send(o, { t: 'dm', msg: row, name: p.name });
+  }
+
+  private allowance(p: AuthState): GiftAllowanceInfo {
+    const a = giftAllowance(p, this.now());
+    const rel = (t: number | null) => (t === null ? null : Math.max(0, t - this.now()));
+    return { coinsLeft: a.coinsLeft, itemsLeft: a.itemsLeft, coinsIn: rel(a.coinsFreeAt), itemsIn: rel(a.itemsFreeAt) };
+  }
+
+  /** Don à un ami : vérifié et appliqué par l'autorité sur les deux profils, enregistré en une transaction. */
+  private gift(c: Client, to: unknown, payload: unknown, tx: unknown): void {
+    const p = c.profile!;
+    const txs = typeof tx === 'string' && TX_RE.test(tx) ? tx : '';
+    const done = (ok: boolean, msg: string, reply?: AuthReply) => {
+      const r = { t: 'giftResult' as const, ok, msg, tx: txs, reply, allowance: this.allowance(p) };
+      if (txs) { this.giftReplies.set(`${p.id}:${txs}`, r); if (this.giftReplies.size > 2000) this.giftReplies.delete(this.giftReplies.keys().next().value as string); }
+      this.send(c, r);
+    };
+    if (!txs) { this.send(c, { t: 'giftResult', ok: false, msg: 'Requête invalide', tx: '', allowance: this.allowance(p) }); return; }
+    // Même don renvoyé (coupure, double appui) : même réponse, rien n'est rejoué
+    const again = this.giftReplies.get(`${p.id}:${txs}`);
+    if (again) { this.send(c, again); return; }
+    if (!this.giftLimiter.allow(p.id, this.now())) return done(false, 'Trop de dons d’affilée : patiente une minute.');
+    if (typeof to !== 'string' || to === p.id) return done(false, 'Destinataire invalide');
+    if (!this.isFriend(p.id, to)) return done(false, 'Les cadeaux ne s’envoient qu’à tes amis.');
+    if (this.blockedEither(p.id, to)) return done(false, 'Impossible d’envoyer un cadeau à ce joueur.');
+    const liveTo = this.byAccount.get(to);
+    const dest = liveTo?.profile ?? this.store.profile(to);
+    if (!dest) return done(false, 'Ce joueur n’existe plus.');
+    const env = { ...this.env(), seed: p.id, online: true };
+    const snapA = structuredClone(p), snapB = structuredClone(dest);
+    let label = '', kind = '', amount = 0, item: string | null = null;
+    const reply = transact(p, env, () => {
+      const g = giveGift(p, dest, payload, `${p.id}:${txs}`, this.now());
+      label = g.label; kind = g.kind; amount = g.amount; item = g.item ?? g.key?.uid ?? null;
+      return { view: { gift: g.kind, label: g.label, to }, stake: 0, payout: 0, done: true };
+    });
+    if (!reply.ok) return done(false, reply.error, reply);
+    // La clé reçue est vérifiée côté destinataire à la prochaine requête (version de serrure du propriétaire)
+    try {
+      this.store.saveMany([p, dest], { from: p.id, to, kind, amount, item, label, tx: `${p.id}:${txs}`, at: this.now() });
+    } catch (e) {
+      // Échec d'écriture : les deux profils reviennent à l'état d'avant (rien n'est perdu ni créé)
+      console.error('[KingSea] don', e);
+      for (const [live, snap] of [[p, snapA], [dest, snapB]] as const) { for (const k of Object.keys(live)) delete (live as unknown as Record<string, unknown>)[k]; Object.assign(live, snap); }
+      return done(false, 'Le don n’a pas pu être enregistré : rien n’a été débité.');
+    }
+    const destEnv = { ...this.env(), seed: to, online: true };
+    const destReply = transact(dest, destEnv, () => ({ view: { giftFrom: p.id, label }, stake: 0, payout: 0, done: true }));
+    done(true, `${label[0]?.toUpperCase() ?? ''}${label.slice(1)} envoyé${kind === 'coins' || kind === 'chips' ? 's' : ''} à ${dest.name}.`, reply);
+    if (liveTo) {
+      this.store.save(dest);
+      this.send(liveTo, { t: 'giftIn', from: p.id, name: p.name, label, reply: destReply });
+    }
+  }
+
+  // ---------------------------------------------------------------- visites
+  private visitAsk(c: Client, to: unknown): void {
+    const p = c.profile!;
+    const no = (msg: string) => this.send(c, { t: 'visitReply', ok: false, msg });
+    if (typeof to !== 'string' || to === p.id) return no('Choisis un ami à visiter.');
+    if (!this.ringLimiter.allow(p.id, this.now())) return no('Tu as beaucoup sonné : patiente une minute.');
+    if (!this.isFriend(p.id, to)) return no('Tu ne peux sonner que chez tes amis.');
+    if (this.blockedEither(p.id, to)) return no('Visite impossible.');
+    const owner = this.byAccount.get(to);
+    const op = owner?.profile ?? this.store.profile(to);
+    if (!op) return no('Ce joueur n’existe plus.');
+    if (!op.cabin.id) return no(`${op.name} n’a pas encore de cabine.`);
+    if (op.flags['cabin.closed']) return no(`${op.name} a fermé sa porte à clé : pas de visite pour le moment.`);
+    if ((this.permits.get(`${to}|${p.id}`) ?? 0) > this.now()) { this.send(c, { t: 'visitReply', ok: true, msg: `${op.name} t’attend déjà.`, owner: to }); return; }
+    if (!owner) return no(`${op.name} n’est pas à bord : reviens sonner quand ${op.name} sera en ligne (ou utilise un double de sa clé).`);
+    if (this.tables.tableOf(to)) return no(`${op.name} est occupé(e) à une table du casino : réessaie un peu plus tard.`);
+    this.rings.set(`${p.id}>${to}`, this.now() + VISIT_RING_MS);
+    this.send(owner, { t: 'visitRing', from: p.id, name: p.name, look: sanitizeLook(p.look) });
+    this.send(c, { t: 'visitReply', ok: true, msg: `Ding-dong ! Tu as sonné chez ${op.name}. En attente de réponse…` });
+  }
+
+  /** Accès à la cabine de `owner` pour `visitor` : propriétaire, invitation acceptée ou double de clé à jour. */
+  private cabinAccess(visitor: AuthState & { id: string }, owner: string): { ok: true; cabin: string; prof: ServerProfile } | { ok: false; msg: string } {
+    const live = this.byAccount.get(owner)?.profile;
+    const op = live ?? this.store.profile(owner);
+    if (!op || !op.cabin.id) return { ok: false, msg: 'Cette cabine n’existe pas.' };
+    if (owner === visitor.id) return { ok: true, cabin: op.cabin.id, prof: op };
+    if (op.flags['cabin.closed']) return { ok: false, msg: `${op.name} a fermé sa porte à clé.` };
+    if (this.blockedEither(owner, visitor.id)) return { ok: false, msg: 'Accès refusé.' };
+    if ((this.permits.get(`${owner}|${visitor.id}`) ?? 0) > this.now()) return { ok: true, cabin: op.cabin.id, prof: op };
+    ensureEconomy(op); ensureMasterKey(op, op.id);
+    ensureEconomy(visitor);
+    const lock = op.keyring!.lock;
+    if ((visitor.keys ?? []).some((k) => !k.master && keyOpens(k, op.cabin.id!, owner, lock))) return { ok: true, cabin: op.cabin.id, prof: op };
+    return { ok: false, msg: `La porte de ${op.name} est fermée : sonne d’abord, ou utilise un double de clé valide.` };
+  }
+
+  private visitorsOf(owner: string): Client[] { return [...this.clients].filter((o) => o.visiting === owner && o.profile); }
+  private sendVisitors(owner: string): void {
+    const o = this.byAccount.get(owner);
+    if (o?.profile) this.send(o, { t: 'visitors', list: this.visitorsOf(owner).map((v) => ({ id: v.profile!.id, name: v.profile!.name })), open: !o.profile.flags['cabin.closed'] });
+  }
+  private evictVisitors(owner: string, msg: string): void {
+    for (const v of this.visitorsOf(owner)) { this.send(v, { t: 'evict', msg }); this.leaveRoom(v); }
   }
 
   private register(c: Client, m: Extract<ClientMsg, { t: 'register' }>): void {
@@ -340,7 +638,7 @@ export class GameServer {
   private refuseBanned(c: Client, id: string): boolean {
     const s = this.store.sanction(id);
     if (!s || s.banUntil <= this.now()) return false;
-    this.send(c, { t: 'kicked', msg: `Compte suspendu par la modération ${until(s.banUntil)}${s.reason ? ` (${s.reason})` : ''}.` });
+    this.send(c, { t: 'kicked', msg: `Compte suspendu par la modération ${until(s.banUntil, this.now())}${s.reason ? ` (${s.reason})` : ''}.` });
     c.sock.close(4003, 'suspendu');
     return true;
   }
@@ -409,7 +707,7 @@ export class GameServer {
     let notice: string | undefined;
     for (const s of activeSessions(p)) {
       const pay = abandonSession(p, s.game, this.env());
-      notice = `Partie de ${GAME_LABELS[s.game] ?? s.game} interrompue terminée : ${pay > 0 ? `+${pay} KSCoins` : 'mise perdue'}.`;
+      notice = `Partie de ${GAME_LABELS[s.game] ?? s.game} interrompue terminée : ${pay > 0 ? `+${pay} jetons` : 'mise perdue'}.`;
     }
     this.store.save(p);
     this.send(c, { t: 'auth', token, profile: this.own(p, c), notice });
@@ -422,6 +720,7 @@ export class GameServer {
     ensureProgress(p);
     refreshMissions(p, this.env(), p.id, true);
     ensureEconomy(p);
+    ensureMasterKey(p, p.id);
     // Une reconnexion ne doit jamais faire chuter les jauges : le prochain relevé repart d'ici
     p.needs!.lastTick = this.now();
     this.store.save(p);
@@ -430,6 +729,7 @@ export class GameServer {
       dailyRewards: p.dailyRewards, cabin: p.cabin, location: { floorId: p.location.floorId }, blocked: [...c.blocked],
       progress: p.progress!, missions: p.missions ?? null, room: p.room!,
       chips: p.chips!.balance, inventory: { ...p.inventory!.items }, needs: { hunger: p.needs!.hunger, thirst: p.needs!.thirst },
+      keys: (p.keys ?? []).map((k) => ({ ...k })), lock: p.keyring?.lock ?? 0, contacts: this.store.contacts(p.id),
     };
   }
 
@@ -450,13 +750,27 @@ export class GameServer {
     return { id: p.id, n: c.num, name: p.name, look: p.look, x: Math.round(c.pos.x), y: Math.round(c.pos.y), dir: c.pos.dir, anim: c.pos.anim };
   }
 
-  private join(c: Client, floor: unknown, x: unknown, y: unknown): void {
+  private join(c: Client, floor: unknown, x: unknown, y: unknown, cabinOwner?: unknown): void {
     const p = c.profile!;
     if (typeof floor !== 'string') return;
+    ensureProgress(p); ensureEconomy(p);
+    // Ponts réservés : KS Pass Croisière (et niveau pour certains espaces), vérifiés par le serveur
+    const acc = floorAccess(floor, p.inventory!.items, p.progress!.unlocks);
+    if (!acc.ok) { this.send(c, { t: 'notice', msg: acc.reason }); return; }
     let room = floor;
+    let visit: Extract<ServerMsg, { t: 'room' }>['visit'] = null;
+    let owner: string | null = null;
     if (floor === 'cabin-interior') {
-      if (!p.cabin.id) { this.send(c, { t: 'notice', msg: 'Tu n’as pas encore de cabine.' }); return; }
-      room = `cabin:${p.cabin.id}`; // chaque cabine est privée : son propriétaire y est seul
+      owner = typeof cabinOwner === 'string' && cabinOwner ? cabinOwner : p.id;
+      if (owner === p.id && !p.cabin.id) { this.send(c, { t: 'notice', msg: 'Tu n’as pas encore de cabine.' }); return; }
+      const a = this.cabinAccess(p, owner);
+      if (!a.ok) { this.send(c, { t: 'evict', msg: a.msg }); return; }
+      room = `cabin:${a.cabin}`; // chaque cabine est une instance privée : son propriétaire et ses invités
+      if (owner !== p.id) {
+        ensureProgress(a.prof);
+        visit = { owner, name: a.prof.name, room: a.prof.room!, wallColor: a.prof.cabin.wallColor, cabin: a.cabin };
+        this.permits.delete(`${owner}|${p.id}`);
+      }
     }
     const map = this.mapFor(floor);
     if (!map) return;
@@ -468,13 +782,16 @@ export class GameServer {
     }
     this.leaveRoom(c);
     c.room = room; c.floor = floor;
+    c.visiting = owner && owner !== p.id ? owner : null;
     c.pos = { x: px, y: py, t: this.now(), dir: 'down', anim: 'idle' };
     let set = this.rooms.get(room);
     if (!set) { set = new Set(); this.rooms.set(room, set); }
     set.add(c);
     p.location = { floorId: floor, x: px, y: py };
-    this.send(c, { t: 'room', floor, players: [...set].filter((o) => o !== c && o.profile).map((o) => this.pub(o)) });
+    this.send(c, { t: 'room', floor, players: [...set].filter((o) => o !== c && o.profile).map((o) => this.pub(o)), visit });
     this.toRoom(room, { t: 'enter', p: this.pub(c) }, c);
+    if (c.visiting) this.sendVisitors(c.visiting);
+    else if (floor === 'cabin-interior') this.sendVisitors(p.id);
   }
 
   private leaveRoom(c: Client): void {
@@ -483,7 +800,12 @@ export class GameServer {
     set?.delete(c);
     if (c.profile) this.toRoom(c.room, { t: 'leave', id: c.profile.id }, c);
     if (set && !set.size) { this.rooms.delete(c.room); }
+    const wasCabin = c.room.startsWith('cabin:');
     c.room = null;
+    const host = c.visiting; c.visiting = null;
+    if (host) this.sendVisitors(host);
+    // Le propriétaire quitte sa cabine : ses invités sont raccompagnés (il garde le contrôle de l'accès)
+    else if (wasCabin && c.profile) this.evictVisitors(c.profile.id, `${c.profile.name} est sorti(e) de sa cabine : retour au couloir.`);
   }
 
   private move(c: Client, m: Extract<ClientMsg, { t: 'move' }>): void {
@@ -505,7 +827,7 @@ export class GameServer {
     if (!prof) return null;
     const online = !!live;
     const floor = online ? this.byAccount.get(id)!.floor : null;
-    return { id, name: prof.name, level: prof.progress?.level ?? 1, title: prof.progress?.title ?? null, online, floor: floor === 'cabin-interior' ? 'cabin-interior' : floor, since };
+    return { id, name: prof.name, level: prof.progress?.level ?? 1, title: prof.progress?.title ?? null, online, floor: floor === 'cabin-interior' ? 'cabin-interior' : floor, since, look: sanitizeLook(prof.look) };
   }
 
   private friendsData(id: string): FriendsData {

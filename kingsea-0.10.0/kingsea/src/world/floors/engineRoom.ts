@@ -46,6 +46,10 @@ export const engineFloor: FloorDef = {
     { kind: 'crate', tx: 26, ty: 14, w: 1, h: 1, solid: true },
     { kind: 'crate', tx: 26, ty: 13, w: 1, h: 1, solid: true },
     { kind: 'valve', tx: 11, ty: 13, w: 1, h: 1, solid: true },
+    // Évents de vapeur (passerelles) : ambiance de chaufferie
+    { kind: 'steamVent', tx: 11, ty: 5, w: 1, h: 1 },
+    { kind: 'steamVent', tx: 18, ty: 9, w: 1, h: 1 },
+    { kind: 'steamVent', tx: 6, ty: 12, w: 1, h: 1 },
     // Objet caché : visible seulement avec l'éclairage de maintenance, une seule fois.
     { kind: 'compass', id: 'golden-compass', tx: 27, ty: 15, w: 1, h: 1, requiresFlag: 'engine.lights', collectible: true,
       interact: { id: 'compass', label: 'Ramasser', at: { x: 27.5, y: 15.6 }, radius: 1.4 } },

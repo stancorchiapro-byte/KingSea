@@ -5,7 +5,7 @@
 // objets cosmétiques et utilisables (effets visuels), décorations (meubles de cabine, catalogue data/furniture.ts).
 import { MENUS, type Drink } from './drinks';
 
-export type ItemType = 'food' | 'drink' | 'clothing' | 'accessory' | 'cosmetic' | 'usable' | 'decoration';
+export type ItemType = 'food' | 'drink' | 'clothing' | 'accessory' | 'cosmetic' | 'usable' | 'decoration' | 'special';
 /** Emplacement porté : tenue complète, pantalon, chaussures, couvre-chef, lunettes, bijou. */
 export type WearSlot = 'outfit' | 'pants' | 'shoes' | 'hat' | 'glasses' | 'jewel';
 export type UseEffect = 'fireworks' | 'confetti' | 'aura';
@@ -31,6 +31,10 @@ export interface ItemDef {
   /** Couleurs d'icône. */
   colors: [string, string];
   effect?: UseEffect;
+  /** Objet personnel : ne peut être ni donné, ni vendu, ni échangé (téléphone, KS Pass, clé principale). */
+  noTransfer?: boolean;
+  /** Récompense exclusive (niveau, passe de croisière) : jamais vendue en boutique. */
+  exclusive?: boolean;
 }
 
 const consumable = (menu: string, d: Drink): ItemDef => ({
@@ -65,7 +69,12 @@ const WEAR: Array<[WearSlot, string, string, string, number, number, [string, st
   ['jewel', 'montre', 'Montre dorée', 'Bracelet maille milanaise', 250, 2, ['#d4af5a', '#141216'], 'accessory'],
   ['jewel', 'boucles', 'Boucles d’oreilles', 'Créoles dorées', 120, 1, ['#d4af5a', '#efdcae'], 'accessory'],
   ['jewel', 'chaine', 'Chaîne en or', 'Maille épaisse', 300, 3, ['#d4af5a', '#8a6a2b'], 'accessory'],
+  // Récompenses exclusives (niveaux, passe) : jamais en boutique
+  ['hat', 'amiral', 'Bicorne d’amiral', 'Feutre bleu nuit, galon et cocarde dorés', 400, 14, ['#0e2a4a', '#e5b54a'], 'accessory'],
+  ['hat', 'couronne', 'Couronne des mers', 'Or fin et perles : la marque des légendes', 800, 30, ['#e5b54a', '#f6f0e3'], 'accessory'],
+  ['jewel', 'medaille', 'Médaille du navigateur', 'Rose des vents en or sur ruban marine', 300, 18, ['#e5b54a', '#173e72'], 'accessory'],
 ];
+const EXCLUSIVE_WEAR = new Set(['hat:amiral', 'hat:couronne', 'jewel:medaille']);
 
 /** Éléments de base, toujours disponibles (pas besoin de les acheter). */
 export const FREE_WEAR: Record<WearSlot, string[]> = {
@@ -79,10 +88,17 @@ export const FREE_WEAR: Record<WearSlot, string[]> = {
 
 export const ITEMS: ItemDef[] = [
   ...Object.entries(MENUS).flatMap(([menu, list]) => list.map((d) => consumable(menu, d))),
-  ...WEAR.map(([slot, value, name, desc, price, level, colors, type]): ItemDef => ({ id: `${slot}:${value}`, name, type, desc, price, stack: 1, level, slot, value, colors })),
+  ...WEAR.map(([slot, value, name, desc, price, level, colors, type]): ItemDef => ({ id: `${slot}:${value}`, name, type, desc, price, stack: 1, level, slot, value, colors, ...(EXCLUSIVE_WEAR.has(`${slot}:${value}`) ? { exclusive: true } : {}) })),
   { id: 'use.fireworks', name: 'Feu d’artifice de poche', type: 'usable', desc: 'Une gerbe d’étincelles dorées autour de toi', price: 40, stack: 10, colors: ['#ffd166', '#ff3fa4'], effect: 'fireworks' },
   { id: 'use.confetti', name: 'Canon à confettis', type: 'usable', desc: 'Pour fêter un gros gain', price: 25, stack: 10, colors: ['#1fc7c1', '#ff6f91'], effect: 'confetti' },
   { id: 'cos.parfum', name: 'Eau de parfum KS', type: 'cosmetic', desc: 'Un sillage scintillant pendant 3 minutes', price: 90, stack: 5, level: 2, colors: ['#efdcae', '#d4af5a'], effect: 'aura' },
+  // Objets spéciaux : personnels, non transférables
+  { id: 'phone', name: 'Téléphone KS', type: 'special', desc: 'Messages privés, contacts, dons entre amis et visites de cabine', price: 0, stack: 1, colors: ['#0b1424', '#1fc7c1'], noTransfer: true },
+  { id: 'ks-pass', name: 'KS Pass Croisière', type: 'special', desc: 'Titre de croisière officiel : donne accès à tous les ponts du KingSea. Personnel et nominatif.', price: 0, stack: 1, colors: ['#0e2a4a', '#e5b54a'], noTransfer: true },
+  // Récompenses exclusives (niveaux, passe de croisière) : utilisables, et transférables entre amis
+  { id: 'use.fireworks-royal', name: 'Bouquet royal', type: 'usable', desc: 'Un feu d’artifice doré et turquoise, réservé aux passagers fidèles', price: 60, stack: 10, colors: ['#e5b54a', '#1fc7c1'], effect: 'fireworks', exclusive: true },
+  { id: 'use.confetti-or', name: 'Pluie d’or', type: 'usable', desc: 'Confettis dorés de la saison Baie Royale', price: 40, stack: 10, colors: ['#e5b54a', '#fff2b3'], effect: 'confetti', exclusive: true },
+  { id: 'cos.embruns', name: 'Brume des embruns', type: 'cosmetic', desc: 'Un sillage d’écume nacrée pendant 3 minutes', price: 90, stack: 5, colors: ['#bfe6f2', '#1fc7c1'], effect: 'aura', exclusive: true },
 ];
 
 export const ITEMS_BY_ID = new Map(ITEMS.map((i) => [i.id, i]));
@@ -100,7 +116,30 @@ export function ownsWear(slot: WearSlot, value: string, inventory: Record<string
   return (inventory[k] ?? 0) > 0 || unlocks.includes(k);
 }
 
+/** Rareté (affichage : liseré et étiquette) : déduite du prix et du niveau requis, identique partout. */
+export type Rarity = 'commun' | 'rare' | 'epique' | 'legendaire';
+export const RARITY: Record<Rarity, { label: string; color: string }> = {
+  commun: { label: 'Commun', color: '#b9c3cf' }, rare: { label: 'Rare', color: '#4fb6ff' },
+  epique: { label: 'Épique', color: '#c38bff' }, legendaire: { label: 'Légendaire', color: '#e8c35a' },
+};
+export function rarityOf(price: number, level = 1): Rarity {
+  if (price >= 300 || level >= 3) return 'legendaire';
+  if (price >= 200 || level >= 2) return 'epique';
+  if (price >= 100) return 'rare';
+  return 'commun';
+}
+
 /** Libellés des types (inventaire). */
 export const TYPE_LABELS: Record<ItemType, string> = {
-  food: 'Nourriture', drink: 'Boissons', clothing: 'Vêtements', accessory: 'Accessoires', cosmetic: 'Cosmétiques', usable: 'Objets', decoration: 'Décorations',
+  food: 'Nourriture', drink: 'Boissons', clothing: 'Vêtements', accessory: 'Accessoires', cosmetic: 'Cosmétiques', usable: 'Objets', decoration: 'Décorations', special: 'Spécial',
 };
+
+/** Valeur maximale (KSCoins) d'un objet donné à un ami. */
+export const GIFT_ITEM_MAX_VALUE = 100;
+/** Un objet peut-il être donné à un ami (personnel, trop précieux, inconnu : non) ? */
+export function giftable(def: ItemDef | undefined): { ok: true } | { ok: false; why: string } {
+  if (!def) return { ok: false, why: 'Objet inconnu' };
+  if (def.noTransfer) return { ok: false, why: 'Objet personnel : il ne peut pas être donné' };
+  if (def.price <= 0 || def.price > GIFT_ITEM_MAX_VALUE) return { ok: false, why: `Seuls les objets d’une valeur de ${GIFT_ITEM_MAX_VALUE} KSCoins au plus peuvent être donnés` };
+  return { ok: true };
+}

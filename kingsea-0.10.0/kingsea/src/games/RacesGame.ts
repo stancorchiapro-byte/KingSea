@@ -4,7 +4,7 @@ import { roundRect } from '../art/canvas';
 import { PAL } from '../art/palette';
 import type { PointerHandler, PointerInfo } from '../engine/Input';
 import { clamp } from '../engine/math';
-import { ButtonLayer, makeButton, type Button } from '../ui/UIKit';
+import { ButtonLayer, font, makeButton, type Button } from '../ui/UIKit';
 import { type Horse } from './logic/races';
 import type { MiniGame, MiniGameHost } from './MiniGame';
 import { drawChip, drawLabel, drawPill } from './widgets';
@@ -14,6 +14,7 @@ const RACE_TIME = 7;
 
 export class RacesGame implements MiniGame {
   readonly id = 'races';
+  readonly tableGame = 'races';
   readonly title = 'Courses de chevaux';
   readonly bg: [string, string] = ['#0f3a1a', '#041008'];
   readonly currency = 'chips' as const;
@@ -100,6 +101,17 @@ export class RacesGame implements MiniGame {
   /** Partants et cotes fixés par l'autorité (impossible de modifier les cotes depuis le téléphone). */
   private async newRace(): Promise<void> {
     if (this.waiting) return;
+    // Table en ligne : les partants sont ceux de la manche commune (fixés par le serveur)
+    const t = this.host.table;
+    if (t) {
+      const tf = t.state?.phase !== 'show' ? t.state?.data.field as Horse[] | null | undefined : null;
+      if (!tf) { this.message = 'Course en cours à la table : les prochains partants arrivent…'; setTimeout(() => void this.newRace(), 1200); return; }
+      const first = this.field.length === 0;
+      this.field = tf; this.bets = {}; this.order = []; this.phase = 'bet'; this.raceT = 0;
+      this.message = first ? 'Touche un cheval pour miser (course commune à la table).' : 'Nouvelle course commune : touche un cheval pour miser.';
+      this.layout();
+      return;
+    }
     this.waiting = true;
     const r = await this.host.s.ask('casino', 'races', 'field', {});
     this.waiting = false;
@@ -117,7 +129,7 @@ export class RacesGame implements MiniGame {
     if (this.phase !== 'bet' || this.staked <= 0) return;
     this.waiting = true;
     this.lastBets = { ...this.bets };
-    const r = await s.ask('casino', 'races', 'run', { bets: { ...this.bets } });
+    const r = await this.host.playRound('races', 'run', { bets: { ...this.bets } }, this.staked, () => { this.message = 'Mise acceptée : départ commun à la fin du compte à rebours.'; });
     this.waiting = false;
     if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
     const order = r.view.order as number[];
@@ -125,9 +137,11 @@ export class RacesGame implements MiniGame {
     // Temps d'arrivée croissants selon la place, avec un peu de suspense
     this.finishTimes = new Array(6).fill(0);
     order.forEach((h, place) => { this.finishTimes[h] = RACE_TIME + place * 0.28 + Math.random() * 0.12; });
-    this.raceT = 0; this.phase = 'race'; this.message = 'Et ils sont partis !';
+    this.raceT = 0; this.phase = 'race'; this.message = 'Et ils sont partis !'; this.cheered = false;
     s.audio.ding();
   }
+
+  private cheered = false;
 
   /** Progression 0..1 d'un cheval : allure irrégulière, mais arrivée au temps prévu. */
   private progress(h: number): number {
@@ -142,11 +156,13 @@ export class RacesGame implements MiniGame {
     const s = this.host.s;
     if (this.phase === 'race') {
       this.raceT += dt;
-      if (Math.floor(this.raceT * 4) !== Math.floor((this.raceT - dt) * 4)) s.audio.knock(0.2);
+      // Battement des sabots (galop à quatre temps), plus fort à l'approche de l'arrivée
+      if (Math.floor(this.raceT * 7) !== Math.floor((this.raceT - dt) * 7)) s.audio.knock(0.12 + 0.2 * Math.min(1, this.raceT / RACE_TIME));
+      if (!this.cheered && this.raceT > RACE_TIME * 0.85) { this.cheered = true; s.audio.cheer(); }
       if (this.raceT > Math.max(...this.finishTimes) + 0.6) {
         const w = this.order[0], ret = this.settled.payout, net = ret - this.settled.stake;
         this.message = `${this.field[w].name} gagne (cote ${this.field[w].odds}) · ${net > 0 ? `+${net}` : net} jetons`;
-        if (net > 0) s.audio.win(); else s.audio.lose();
+        this.host.celebrate(net, this.settled.stake, `${this.field[w].name} gagne · cote ${String(this.field[w].odds).replace('.', ',')}`);
         this.phase = 'done';
       }
     }
@@ -168,36 +184,102 @@ export class RacesGame implements MiniGame {
       ctx.strokeStyle = h.color; ctx.lineWidth = 2; ctx.stroke();
       ctx.fillStyle = h.color; ctx.beginPath(); ctx.arc(r.x + 16 * ui, r.y + r.h / 2, 8 * ui, 0, Math.PI * 2); ctx.fill();
       drawLabel(ctx, String(i + 1), r.x + 16 * ui, r.y + r.h / 2, 10 * ui, '#fff');
-      drawLabel(ctx, h.name, r.x + 32 * ui, r.y + r.h / 2, Math.min(14 * ui, r.h * 0.4), PAL.text, 'left', 800);
-      drawLabel(ctx, `cote ${String(h.odds).replace('.', ',')}`, r.x + r.w - (this.bets[i] ? 52 : 10) * ui, r.y + r.h / 2, 12 * ui, PAL.gold, 'right', 800);
+      // Nom et cote sur une ligne si la place suffit, sinon sur deux lignes (portrait)
+      const nameFs = Math.min(14 * ui, r.h * 0.4), odds = `cote ${String(h.odds).replace('.', ',')}`;
+      ctx.font = font(nameFs, 800); const nw = ctx.measureText(h.name).width;
+      ctx.font = font(12 * ui, 800); const ow = ctx.measureText(odds).width;
+      const right = r.w - (this.bets[i] ? 52 : 10) * ui;
+      if (32 * ui + nw + 10 * ui + ow <= right || r.h < 40 * ui) {
+        drawLabel(ctx, h.name, r.x + 32 * ui, r.y + r.h / 2, nameFs, PAL.text, 'left', 800);
+        drawLabel(ctx, odds, r.x + right, r.y + r.h / 2, 12 * ui, PAL.gold, 'right', 800);
+      } else {
+        drawLabel(ctx, h.name, r.x + 32 * ui, r.y + r.h / 2 - 9 * ui, Math.min(nameFs, ((right - 36 * ui) / Math.max(1, nw)) * nameFs), PAL.text, 'left', 800);
+        drawLabel(ctx, odds, r.x + 32 * ui, r.y + r.h / 2 + 10 * ui, 12 * ui, PAL.gold, 'left', 800);
+      }
       if (this.bets[i]) { drawChip(ctx, r.x + r.w - 22 * ui, r.y + r.h / 2, Math.min(r.h * 0.38, 14 * ui), Math.min(100, this.bets[i])); }
     });
-    // Piste
+    // Piste : gazon tondu en bandes, lices blanches, poteaux de distance, poteau d'arrivée
     const T = this.track;
-    roundRect(ctx, T.x, T.y, T.w, T.h, 14 * ui); ctx.fillStyle = '#2f7a3a'; ctx.fill();
+    ctx.save();
+    roundRect(ctx, T.x, T.y, T.w, T.h, 14 * ui); ctx.clip();
+    const turf = ctx.createLinearGradient(0, T.y, 0, T.y + T.h); turf.addColorStop(0, '#2d7a3a'); turf.addColorStop(1, '#246630');
+    ctx.fillStyle = turf; ctx.fillRect(T.x, T.y, T.w, T.h);
     const lane = T.h / 6;
-    for (let i = 0; i < 6; i++) {
-      ctx.fillStyle = i % 2 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'; ctx.fillRect(T.x, T.y + i * lane, T.w, lane);
-    }
+    const stripe = Math.max(18 * ui, T.w / 14);
+    for (let x = T.x - stripe; x < T.x + T.w; x += stripe * 2) { ctx.fillStyle = 'rgba(255,255,255,0.045)'; ctx.fillRect(x, T.y, stripe, T.h); }
+    for (let i = 1; i < 6; i++) { ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(T.x, T.y + i * lane - 0.5, T.w, 1); }
     const finishX = T.x + T.w - 28 * ui, startX = T.x + 26 * (lane / 40);
+    // Poteaux de distance
+    for (let k = 1; k <= 3; k++) { const x = startX + (finishX - startX) * (k / 4); ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(x - 1, T.y, 2, 6 * ui); ctx.fillRect(x - 1, T.y + T.h - 6 * ui, 2, 6 * ui); }
+    // Ligne d'arrivée en damier et poteau rouge et blanc
     for (let y = T.y; y < T.y + T.h; y += 8) { ctx.fillStyle = Math.floor((y - T.y) / 8) % 2 ? '#fff' : '#111'; ctx.fillRect(finishX, y, 6, 8); }
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2.5; roundRect(ctx, T.x, T.y, T.w, T.h, 14 * ui); ctx.stroke();
+    // Classement en direct (ordre des positions à l'écran)
+    const live = this.field.map((_, i) => i).sort((a, b) => this.progress(b) - this.progress(a));
     this.field.forEach((h, i) => {
       const p = this.phase === 'bet' ? 0 : this.progress(i);
-      const x = startX + (finishX - startX - 10 * ui) * p, y = T.y + i * lane + lane / 2;
-      const gallop = this.phase === 'race' && p < 1 ? Math.sin(this.t * 18 + i) * 2 : 0;
-      // Cheval stylisé (taille relative au couloir)
-      const k = lane / 40;
-      ctx.fillStyle = '#3a2414'; for (const dx of [-8, -4, 6, 10]) ctx.fillRect(x + dx * k, y + 3 * k, 2.2 * k, 9 * k - Math.abs(gallop) * (dx > 0 ? 1 : -0.5));
-      ctx.fillStyle = '#6b4226'; ctx.beginPath(); ctx.ellipse(x, y + gallop, 14 * k, 7 * k, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(x + 9 * k, y - 3 * k + gallop); ctx.lineTo(x + 15 * k, y - 12 * k + gallop); ctx.lineTo(x + 19 * k, y - 9 * k + gallop); ctx.lineTo(x + 13 * k, y + gallop); ctx.fill();
-      ctx.beginPath(); ctx.ellipse(x + 19 * k, y - 10 * k + gallop, 6 * k, 3.2 * k, 0.4, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = '#2a170b'; ctx.lineWidth = 2 * k; ctx.beginPath(); ctx.moveTo(x - 13 * k, y - 2 * k + gallop); ctx.lineTo(x - 19 * k, y + 4 * k + gallop); ctx.stroke();
-      ctx.fillStyle = h.color; roundRect(ctx, x - 6 * k, y - 15 * k + gallop, 11 * k, 9 * k, 2 * k); ctx.fill(); // casaque du jockey
-      ctx.fillStyle = '#e0b48a'; ctx.beginPath(); ctx.arc(x + 1 * k, y - 18 * k + gallop, 3 * k, 0, Math.PI * 2); ctx.fill();
-      drawLabel(ctx, String(i + 1), x - 0.5 * k, y - 10.5 * k + gallop, 7 * k, '#fff', 'center', 900);
+      const x = startX + (finishX - startX - 10 * ui) * p, y = T.y + i * lane + lane * 0.62;
+      const k = Math.min(lane / 40, T.w / 240) * 1.1;
+      const running = this.phase === 'race' && p < 1;
+      // Poussière soulevée derrière le cheval
+      if (running && !this.host.s.lowFx) for (let d = 0; d < 3; d++) {
+        const age = (this.t * 3 + d / 3 + i * 0.13) % 1;
+        ctx.fillStyle = `rgba(214,190,140,${0.25 * (1 - age)})`; ctx.beginPath(); ctx.arc(x - (16 + age * 22) * k, y + 9 * k - age * 5 * k, (2 + age * 4) * k, 0, Math.PI * 2); ctx.fill();
+      }
+      drawHorse(ctx, x, y, k, h.color, i + 1, running ? this.t * (9 + i * 0.4) + i : 0, running);
+      if (this.phase !== 'bet') {
+        const place = live.indexOf(i) + 1;
+        if (this.phase === 'done' && place <= 3) drawPill(ctx, ['1er', '2e', '3e'][place - 1], x + 2 * k, y - 30 * k, 9 * ui, ['#d4af5a', '#c0c6cc', '#c88a4a'][place - 1], '#1a1208');
+      }
     });
-    if (this.message) drawPill(ctx, this.message, this.track.x + this.track.w / 2, this.track.y + this.track.h - 14 * ui, 12 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.message && !this.host.result.active) drawPill(ctx, this.message, this.track.x + this.track.w / 2, this.track.y + this.track.h - 14 * ui, 12 * ui, 'rgba(14,11,16,0.9)', PAL.text, this.track.w - 10 * ui);
     this.betCtl.render(ctx, ui);
     this.layer.render(ctx, ui);
   }
+}
+
+/**
+ * Cheval de course au galop vu de profil : quatre jambes articulées en cycle de galop, encolure, crinière et
+ * queue qui flottent, jockey en casaque aux couleurs du cheval, tapis de selle numéroté.
+ */
+function drawHorse(ctx: CanvasRenderingContext2D, x: number, y: number, k: number, silk: string, num: number, phase: number, running: boolean): void {
+  ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+  const bob = running ? Math.sin(phase * 2) * 1.6 : 0;
+  ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.beginPath(); ctx.ellipse(0, 13, 17, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.translate(0, bob);
+  const coat = '#6b4226', dark = '#3a2414';
+  // Jambes : angles du galop (antérieures et postérieures décalées)
+  const leg = (hx: number, hy: number, ph: number, back: boolean) => {
+    const sw = running ? Math.sin(phase + ph) : 0.15;
+    const a1 = sw * 0.75 + (back ? 0.15 : -0.1), a2 = a1 + (running ? Math.max(0, Math.cos(phase + ph)) * 1.2 : 0.2) * (back ? -1 : 1);
+    const kx = hx + Math.sin(a1) * 6, ky = hy + Math.cos(a1) * 6;
+    const fx = kx + Math.sin(a2) * 6, fy = ky + Math.cos(a2) * 6;
+    ctx.strokeStyle = dark; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(kx, ky); ctx.lineTo(fx, fy); ctx.stroke();
+    ctx.fillStyle = '#1a1008'; ctx.fillRect(fx - 1.4, fy - 0.5, 2.8, 1.6);
+  };
+  leg(-9, 2, Math.PI, true); leg(8, 2, 0.6, false);
+  // Queue
+  const tw = running ? Math.sin(phase * 2) * 3 : 0;
+  ctx.strokeStyle = '#2a170b'; ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(-14, -3); ctx.quadraticCurveTo(-20, -2 + tw, -23, 4 + tw); ctx.stroke();
+  // Corps
+  const g = ctx.createLinearGradient(0, -8, 0, 8); g.addColorStop(0, '#8a5634'); g.addColorStop(1, coat);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(-1, 0, 15, 7, 0, 0, Math.PI * 2); ctx.fill();
+  // Encolure et tête
+  ctx.beginPath(); ctx.moveTo(9, -4); ctx.quadraticCurveTo(13, -14, 17, -15); ctx.lineTo(21, -11); ctx.quadraticCurveTo(17, -6, 14, 1); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(21, -12, 6, 3.2, 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1008'; ctx.beginPath(); ctx.arc(19.5, -13.5, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#2a170b'; ctx.beginPath(); ctx.moveTo(13, -13); ctx.lineTo(10 - (running ? Math.sin(phase * 2) : 0), -9); ctx.lineTo(12, -6); ctx.fill(); // crinière
+  // Jambes du côté visible (par-dessus le corps)
+  leg(-7, 3, Math.PI + 0.7, true); leg(10, 3, 1.3, false);
+  // Tapis de selle numéroté
+  ctx.fillStyle = '#f4efe6'; ctx.fillRect(-6, -6, 9, 7);
+  ctx.fillStyle = '#111827'; ctx.font = '900 5.5px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(num), -1.5, -2.5);
+  // Jockey penché en avant
+  ctx.fillStyle = silk; ctx.beginPath(); ctx.ellipse(1, -11, 4.5, 3.4, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = silk; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(3, -10); ctx.lineTo(9, -8); ctx.stroke();
+  ctx.fillStyle = '#e0b48a'; ctx.beginPath(); ctx.arc(5, -15, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = silk; ctx.beginPath(); ctx.arc(5, -15.8, 2.5, Math.PI, 0); ctx.fill(); // bombe
+  ctx.restore();
 }

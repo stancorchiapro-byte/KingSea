@@ -4,7 +4,7 @@ import { LEGAL } from '../legal/texts';
 import { NPC_LOOKS, warmLook } from '../art/characters';
 import { getStaticLayer } from '../art/floorRenderer';
 import { drawKSLogo } from '../art/logo';
-import { drawOceanBackground } from '../art/ocean';
+import { drawLoadingSea, shipLayout, WATERLINE } from '../art/loadingSea';
 import { PAL } from '../art/palette';
 import { getPropVisual } from '../art/props';
 import type { PointerHandler } from '../engine/Input';
@@ -42,7 +42,9 @@ export class BootScene implements Scene {
   }
 
   exit(): void {}
-  pointerHandlers(): PointerHandler[] { return []; }
+  /** En cas d'erreur : un toucher relance l'étape qui a échoué (jamais d'écran bloqué). */
+  pointerHandlers(): PointerHandler[] { return [{ onDown: () => { if (!this.error) return false; this.error = null; this.retries++; return true; } }]; }
+  private retries = 0;
 
   get progress(): number { return this.steps.length ? this.done / this.steps.length : 1; }
 
@@ -51,7 +53,13 @@ export class BootScene implements Scene {
     if (this.error || this.finished) return;
     if (this.done < this.steps.length) {
       try { this.steps[this.done].run(); this.done++; }
-      catch (e) { this.error = `Erreur de chargement : ${String(e)}`; console.error(e); }
+      catch (e) {
+        console.error('[KingSea] démarrage', e);
+        // Après deux essais, on continue sans cette préparation (elle sera refaite à la demande) : pas de blocage
+        if (this.retries >= 2) { this.done++; return; }
+        this.error = `Chargement interrompu (${this.steps[this.done].label.toLowerCase()})`;
+        this.s.game.refreshHandlers();
+      }
     } else if (this.t > 0.6) {
       this.finished = true;
       this.s.game.goto(this.next, 2.6);
@@ -60,33 +68,66 @@ export class BootScene implements Scene {
 
   render(ctx: CanvasRenderingContext2D): void {
     const v = this.s.game.viewport, ui = v.ui;
-    drawOceanBackground(ctx, v.width, v.height, this.t);
-    const logoSize = Math.min(v.height * 0.3, v.width * 0.42, 220);
-    const cy = v.safe.top + (v.height - v.safe.top - v.safe.bottom) * 0.38;
-    drawKSLogo(ctx, v.width / 2, cy, logoSize, this.t);
+    drawLoadingSea(ctx, v.width, v.height, this.t, this.s.lowFx);
+    // Mise en page selon le navire : logo dans le ciel (portrait) ou à gauche du navire (paysage), plaque sous l'eau
+    const wl = v.height * WATERLINE, lay = shipLayout(v.width, v.height), wide = v.width > v.height * 1.2;
+    const shipTop = wl - lay.width * 0.36 * 0.86;
+    const lx = wide ? Math.max(v.safe.left + 120 * ui, (lay.cx - lay.width / 2) / 2 + v.safe.left / 2) : v.width / 2;
+    const room = wide ? wl - v.safe.top - 10 * ui : shipTop - v.safe.top - 12 * ui;
+    const logoSize = Math.max(40, Math.min(room / (wide ? 2.6 : 2.95), (wide ? (lay.cx - lay.width / 2) * 0.55 : v.width * 0.4), 190));
+    const cy = v.safe.top + 8 * ui + logoSize * 1.05;
+    const halo = ctx.createRadialGradient(lx, cy, logoSize * 0.2, lx, cy, logoSize * 1.3);
+    halo.addColorStop(0, 'rgba(255,226,170,0.25)'); halo.addColorStop(1, 'rgba(255,226,170,0)');
+    ctx.fillStyle = halo; ctx.fillRect(lx - logoSize * 1.4, cy - logoSize * 1.4, logoSize * 2.8, logoSize * 2.8);
+    drawKSLogo(ctx, lx, cy + Math.sin(this.t * 1.2) * 2 * ui, logoSize, this.t);
 
-    const bw = Math.min(320 * ui, v.width * 0.6), bh = 10 * ui;
-    const bx = v.width / 2 - bw / 2, by = Math.min(v.height - v.safe.bottom - 40 * ui, cy + logoSize * 1.32);
-    roundRect(ctx, bx, by, bw, bh, bh / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
-    if (this.progress > 0) {
-      roundRect(ctx, bx, by, Math.max(bh, bw * this.progress), bh, bh / 2);
-      const g = ctx.createLinearGradient(bx, 0, bx + bw, 0); g.addColorStop(0, PAL.turquoise); g.addColorStop(1, PAL.gold);
+    // Plaque de chargement : barre dorée avec une perle qui avance (progression réelle des étapes)
+    const pw0 = Math.min(360 * ui, v.width - 40 * ui), bh = 8 * ui;
+    const pcx = wide ? lx : v.width / 2;
+    const pw = wide ? Math.min(pw0, 2 * (lx - v.safe.left - 24 * ui)) : pw0;
+    const px = pcx - pw / 2, py = Math.min(v.height - v.safe.bottom - 112 * ui, Math.max(wl + 40 * ui, (wl + v.height - v.safe.bottom) / 2 - 30 * ui));
+    roundRect(ctx, px - 16 * ui, py - 18 * ui, pw + 32 * ui, 100 * ui, 16 * ui);
+    ctx.fillStyle = 'rgba(6,14,28,0.72)'; ctx.fill(); ctx.strokeStyle = 'rgba(212,175,90,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+    roundRect(ctx, px, py, pw, bh, bh / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    const p = this.progress;
+    if (p > 0) {
+      roundRect(ctx, px, py, Math.max(bh, pw * p), bh, bh / 2);
+      const g = ctx.createLinearGradient(px, 0, px + pw, 0); g.addColorStop(0, PAL.turquoise); g.addColorStop(1, PAL.gold);
       ctx.fillStyle = g; ctx.fill();
+      // Reflet qui glisse sur la partie remplie
+      if (!this.s.lowFx) {
+        const sx = px + ((this.t * 0.6) % 1) * pw * p;
+        const sg = ctx.createLinearGradient(sx - 30, 0, sx + 30, 0); sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(0.5, 'rgba(255,255,255,0.45)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.save(); roundRect(ctx, px, py, Math.max(bh, pw * p), bh, bh / 2); ctx.clip(); ctx.fillStyle = sg; ctx.fillRect(sx - 30, py, 60, bh); ctx.restore();
+      }
     }
-    ctx.fillStyle = this.error ? PAL.danger : PAL.textDim; ctx.font = font(13 * ui, 600); ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    // Perle au bout de la progression
+    const pxp = px + Math.max(bh / 2, pw * p), pr = 8 * ui;
+    const pg = ctx.createRadialGradient(pxp - pr * 0.3, py + bh / 2 - pr * 0.3, 1, pxp, py + bh / 2, pr);
+    pg.addColorStop(0, '#ffffff'); pg.addColorStop(0.7, '#f1e9ff'); pg.addColorStop(1, '#bfaee0');
+    ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(pxp, py + bh / 2, pr, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(212,175,90,0.8)'; ctx.lineWidth = 1.2; ctx.stroke();
+
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const step = this.steps[Math.min(this.done, this.steps.length - 1)];
     const label = this.error ?? (this.done >= this.steps.length ? 'Embarquement !' : `${step?.label ?? ''}…`);
-    ctx.fillText(`${label}  ${Math.round(this.progress * 100)} %`, v.width / 2, by + bh + 10 * ui, v.width - 32);
-    ctx.fillStyle = 'rgba(239,220,174,0.7)'; ctx.font = font(12 * ui, 700);
-    ctx.fillText(`Un jeu de ${LEGAL.publisher}`, v.width / 2, by + bh + 32 * ui, v.width - 32);
-    // Indicateur d'activité : petite barre à roue de navire qui tourne
+    ctx.fillStyle = this.error ? '#ff9b9b' : PAL.text; ctx.font = font(13.5 * ui, 700);
+    ctx.fillText(this.error ? label : `${label}  ${Math.round(p * 100)} %`, pcx, py + 28 * ui, pw);
+    ctx.font = font(12 * ui, 600); ctx.fillStyle = 'rgba(239,220,174,0.75)';
+    ctx.fillText(this.error ? 'Touche l’écran pour réessayer' : `Un jeu de ${LEGAL.publisher} · v${typeof __KS_VERSION__ !== 'undefined' ? __KS_VERSION__ : ''}`, pcx, py + 52 * ui, pw);
+    // Astuce (change toutes les 3 s)
     if (!this.error) {
-      const wx = bx - 18 * ui, wy = by + bh / 2, wr = 9 * ui;
-      ctx.save(); ctx.translate(wx, wy); ctx.rotate(this.t * 3);
-      ctx.strokeStyle = PAL.gold; ctx.lineWidth = 2 * ui;
-      ctx.beginPath(); ctx.arc(0, 0, wr * 0.6, 0, Math.PI * 2); ctx.stroke();
-      for (let i = 0; i < 8; i++) { const a = (i / 8) * Math.PI * 2; ctx.beginPath(); ctx.moveTo(Math.cos(a) * wr * 0.2, Math.sin(a) * wr * 0.2); ctx.lineTo(Math.cos(a) * wr, Math.sin(a) * wr); ctx.stroke(); }
-      ctx.restore();
+      const tip = TIPS[Math.floor(this.t / 3) % TIPS.length];
+      ctx.font = font(11.5 * ui, 600); ctx.fillStyle = 'rgba(200,230,255,0.7)';
+      ctx.fillText(tip, pcx, Math.min(v.height - v.safe.bottom - 14 * ui, py + 96 * ui), wide ? Math.min(v.width - 30 * ui, (lay.cx - lay.width / 2) * 2 - 20 * ui) : v.width - 30 * ui);
     }
   }
 }
+
+const TIPS = [
+  'Astuce : la caisse du casino échange tes KSCoins contre des jetons, et inversement.',
+  'Astuce : surveille la faim et la soif, le bar du hall est juste à gauche.',
+  'Astuce : le Circuit KS t’attend au 2e étage, à l’arcade.',
+  'Astuce : la Boutique KS du hall habille ton personnage.',
+  'Astuce : un poisson doré passe parfois dans l’aquarium du hall…',
+];

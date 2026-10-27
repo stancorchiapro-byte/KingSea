@@ -20,6 +20,7 @@ const DEAL = 0.22;
 
 export class VideoPokerGame implements MiniGame {
   readonly id: string;
+  get tableGame(): string { return this.id; }
   readonly title: string;
   readonly bg: [string, string];
   readonly currency = 'chips' as const;
@@ -57,7 +58,6 @@ export class VideoPokerGame implements MiniGame {
   private dealBtn!: Button;
   private cardRects: Rect[] = [];
   private tableR: Rect = { x: 0, y: 0, w: 0, h: 0 };
-  private felt: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private dealerPos = { x: 0, y: 0, k: 2 };
   private betSpot = { x: 0, y: 0 };
   private flights = new ChipFlights();
@@ -93,17 +93,36 @@ export class VideoPokerGame implements MiniGame {
     this.tableR = { x: a.x + a.w * 0.03, y: this.dealerPos.y - 4 * ui, w: a.w * 0.94, h: tableH - (this.dealerPos.y - a.y) + 4 * ui };
     // Cartes : rangée de 5 au centre du tapis ; table de gains au-dessus
     const T = this.tableR;
-    const payH = Math.min(T.h * 0.3, 110 * ui);
-    const cw = Math.min((T.w * 0.86) / 5.6, (T.h - payH - 90 * ui) / 1.4, 96 * ui);
-    const gap = cw * 0.16, total = cw * 5 + gap * 4;
-    // Cartes centrées entre la table de gains et la case de mise (en bas du tapis)
-    const payBottom = T.y + 18 * ui + payH + 14 * ui;
-    const betY = T.y + T.h - 30 * ui;
-    const free = betY - 70 * ui - payBottom - cw * 1.4;
-    const cy = payBottom + Math.max(0, free * 0.4);
-    this.cardRects = [0, 1, 2, 3, 4].map((i) => ({ x: a.x + (a.w - total) / 2 + i * (cw + gap), y: cy, w: cw, h: cw * 1.4 }));
-    this.betSpot = { x: a.x + a.w / 2, y: Math.min(betY, cy + cw * 1.4 + 74 * ui) };
+    if (!portrait && T.w > T.h * 1.7) {
+      // Paysage : table des gains en colonne à gauche du tapis, grandes cartes à droite
+      const pw = Math.min(T.w * 0.3, 300 * ui), ph = Math.min(T.h * 0.62, 9 * 22 * ui);
+      this.payBox = { x: T.x + T.w * 0.08, y: T.y + (T.h - ph) / 2 - 6 * ui, w: pw, h: ph };
+      const rx = this.payBox.x + pw + 18 * ui, rw = T.x + T.w * 0.93 - rx;
+      const cw = Math.min(rw / 5.6, (T.h * 0.5) / 1.4, 96 * ui), gap = cw * 0.16, total = cw * 5 + gap * 4;
+      const cy = T.y + T.h * 0.16;
+      this.cardsCx = rx + rw / 2;
+      this.cardRects = [0, 1, 2, 3, 4].map((i) => ({ x: this.cardsCx - total / 2 + i * (cw + gap), y: cy, w: cw, h: cw * 1.4 }));
+      this.betSpot = { x: this.cardsCx, y: Math.min(T.y + T.h - 26 * ui, cy + cw * 1.4 + 62 * ui) };
+    } else {
+      const payH = Math.min(T.h * 0.3, 110 * ui);
+      // Table des gains : plaque centrée, en retrait des bords arrondis du tapis
+      const pw = Math.min(T.w * (portrait ? 0.8 : 0.76), 640 * ui);
+      this.payBox = { x: a.x + (a.w - pw) / 2, y: T.y + (portrait ? 30 : 20) * ui, w: pw, h: payH };
+      const cw = Math.min((T.w * 0.86) / 5.6, (T.h - payH - 90 * ui) / 1.4, 96 * ui);
+      const gap = cw * 0.16, total = cw * 5 + gap * 4;
+      // Cartes centrées entre la table de gains et la case de mise (en bas du tapis)
+      const payBottom = this.payBox.y + payH + 22 * ui;
+      const betY = T.y + T.h - 30 * ui;
+      const free = betY - 70 * ui - payBottom - cw * 1.4;
+      const cy = payBottom + Math.max(0, free * 0.4);
+      this.cardsCx = a.x + a.w / 2;
+      this.cardRects = [0, 1, 2, 3, 4].map((i) => ({ x: a.x + (a.w - total) / 2 + i * (cw + gap), y: cy, w: cw, h: cw * 1.4 }));
+      this.betSpot = { x: a.x + a.w / 2, y: Math.min(betY, cy + cw * 1.4 + 74 * ui) };
+    }
     this.laidOutBetting = this.betting;
+    // Résultat affiché sous les cartes (elles restent visibles)
+    const r0 = this.cardRects[0];
+    if (r0) { this.host.result.anchorX = (this.cardsCx - a.x) / a.w; this.host.result.anchorY = Math.min(0.9, (r0.y + r0.h + 26 * ui - a.y) / a.h); }
   }
 
   handlers(): PointerHandler[] { return [this.cardHandler, this.layer]; }
@@ -137,7 +156,7 @@ export class VideoPokerGame implements MiniGame {
       s.audio.chip();
       this.hand = r.view.hand as Card[]; this.held = [false, false, false, false, false];
       this.settledPayout = r.payout;
-      this.winRank = -1;
+      this.winRank = -1; this.winCards = [];
       this.drawn = false;
       this.born = this.hand.map((_, i) => this.t + 0.25 + i * DEAL);
       this.dealer.play('deal', DEAL * 6);
@@ -162,7 +181,7 @@ export class VideoPokerGame implements MiniGame {
   }
 
   private settle(): void {
-    const s = this.host.s, e = evaluate(this.hand), mult = payout(this.table, e);
+    const e = evaluate(this.hand), mult = payout(this.table, e);
     const win = this.settledPayout; // versé par l'autorité ; le calcul local ne sert qu'à l'affichage
     const net = win - this.stake;
     this.winRank = mult > 0 ? e.rank : -1;
@@ -172,7 +191,11 @@ export class VideoPokerGame implements MiniGame {
     if (win > 0) { this.flights.add(d, this.betSpot, win, 12 * ui, 0.45); this.flights.add(this.betSpot, toPlayer, win, 12 * ui, 0.4, 0.55); }
     else this.flights.add(this.betSpot, d, this.stake, 12 * ui, 0.45);
     this.dealer.play(net > 0 ? 'congrats' : net === 0 && win > 0 ? 'pay' : 'collect', 1.4);
-    if (mult > 1) s.audio.win(); else if (mult === 0) s.audio.lose(); else s.audio.chip();
+    this.host.celebrate(net, this.stake, mult > 0 ? e.name : '');
+    // Cartes qui composent la combinaison gagnante (suites/couleurs : les cinq ; sinon les rangs répétés)
+    const counts = new Map<number, number>(); for (const c of this.hand) counts.set(c.rank, (counts.get(c.rank) ?? 0) + 1);
+    this.winCards = mult > 0 ? this.hand.map((c) => [4, 5, 6, 8, 9].includes(e.rank) || (counts.get(c.rank) ?? 0) >= 2) : [];
+    this.winAt = this.t;
     this.phase = 'done';
   }
 
@@ -201,17 +224,22 @@ export class VideoPokerGame implements MiniGame {
 
   /** Vrai une fois le tirage fait (main classique) : la révélation suivante règle la main. */
   private drawn = false;
+  private payBox = { x: 0, y: 0, w: 0, h: 0 };
+  private winCards: boolean[] = [];
+  private winAt = 0;
+  private cardsCx = 0;
 
   render(ctx: CanvasRenderingContext2D): void {
-    const a = this.host.area, ui = this.host.vp.ui, D = this.dealerPos;
+    const ui = this.host.vp.ui, D = this.dealerPos;
     this.dealer.render(ctx, D.x, D.y, D.k, ui);
-    this.felt = drawTable(ctx, this.tableR, ui, this.mode === 'classic' ? 'green' : 'blue');
-    const F = this.felt;
+    drawTable(ctx, this.tableR, ui, this.mode === 'classic' ? 'green' : 'blue');
     // Table des gains imprimée sur le tapis
     const rows = [9, 8, 7, 6, 5, 4, 3, 2, 1].filter((r) => this.table.pays[r]);
-    const top = this.tableR.y + 18 * ui, payH = Math.min(this.tableR.h * 0.3, 110 * ui);
-    const cols = F.w > 560 * ui ? 3 : 2, perCol = Math.ceil(rows.length / cols), lh = payH / perCol;
-    const colW = Math.min(F.w * 0.86, 640 * ui) / cols, x0 = a.x + a.w / 2 - (colW * cols) / 2;
+    const PB = this.payBox, top = PB.y, payH = PB.h;
+    const cols = PB.h > PB.w * 0.6 ? 1 : PB.w > 520 * ui ? 3 : 2, perCol = Math.ceil(rows.length / cols), lh = (payH - 8 * ui) / perCol;
+    const colW = (PB.w - 8 * ui) / cols, x0 = PB.x + 4 * ui;
+    roundRect(ctx, PB.x, PB.y - 4 * ui, PB.w, payH + 4 * ui, 10 * ui); ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(239,220,174,0.35)'; ctx.lineWidth = 1; ctx.stroke();
     rows.forEach((r, i) => {
       const col = Math.floor(i / perCol), row = i % perCol;
       const x = x0 + col * colW + 8 * ui, y = top + row * lh + lh / 2;
@@ -220,9 +248,9 @@ export class VideoPokerGame implements MiniGame {
       if (hot) { roundRect(ctx, x - 6 * ui, y - lh / 2 + 1, colW - 10 * ui, lh - 2, 5 * ui); ctx.fillStyle = 'rgba(212,175,90,0.35)'; ctx.fill(); }
       const fs = Math.min(12 * ui, lh * 0.62, colW / 15);
       drawLabel(ctx, name, x, y, fs, hot ? LUXE.champagne : 'rgba(246,240,227,0.78)', 'left', 700);
-      drawLabel(ctx, `×${this.table.pays[r]}`, x + colW - 20 * ui, y, fs, PAL.gold, 'right', 800);
+      drawLabel(ctx, `×${this.table.pays[r]}`, x + colW - 16 * ui, y, fs, PAL.gold, 'right', 800);
     });
-    feltText(ctx, this.mode === 'classic' ? 'KS Casino · Valets ou mieux' : 'KS Casino · Direct Poker', a.x + a.w / 2, top + payH + 2 * ui, 9 * ui, 0.45);
+    feltText(ctx, this.mode === 'classic' ? 'KS Casino · Valets ou mieux' : 'KS Casino · Direct Poker', PB.x + PB.w / 2, top + payH + 10 * ui, 9 * ui, 0.45);
 
     // Cartes : chaque carte part de la main du croupier, arrive en arc puis se retourne
     const from = this.dealer.hand(D.x, D.y, D.k);
@@ -242,6 +270,14 @@ export class VideoPokerGame implements MiniGame {
       const x = from.x + (r.x - from.x) * e, y = from.y + (r.y - lift - from.y) * e - Math.sin(k * Math.PI) * 16 * ui;
       const flip = Math.min(1, Math.max(0, (this.t - born - DEAL * 0.8) / 0.2));
       drawCard(ctx, c, x, y, r.w, r.h, flip);
+      // Main réglée : cartes de la combinaison soulignées d'or, les autres légèrement estompées
+      if (this.phase === 'done' && this.winCards.length) {
+        if (this.winCards[i]) {
+          const pulse = 0.6 + 0.4 * Math.sin((this.t - this.winAt) * 6);
+          ctx.save(); ctx.shadowColor = '#ffd27a'; ctx.shadowBlur = (this.host.s.lowFx ? 0 : 12) * ui * pulse;
+          ctx.strokeStyle = `rgba(255,214,120,${pulse})`; ctx.lineWidth = 2.5 * ui; roundRect(ctx, x - 2, y - 2, r.w + 4, r.h + 4, r.w * 0.1); ctx.stroke(); ctx.restore();
+        } else { ctx.fillStyle = 'rgba(0,0,0,0.35)'; roundRect(ctx, x, y, r.w, r.h, r.w * 0.09); ctx.fill(); }
+      }
       if (this.held[i] && this.phase !== 'done') drawPill(ctx, 'GARDÉE', r.x + r.w / 2, r.y + r.h + 12 * ui, 10 * ui, PAL.gold, '#1a1208');
       else if (this.phase === 'hold') drawLabel(ctx, 'garder ?', r.x + r.w / 2, r.y + r.h + 12 * ui, 10 * ui, 'rgba(246,240,227,0.6)', 'center', 600);
     });
@@ -252,7 +288,7 @@ export class VideoPokerGame implements MiniGame {
     if (amt > 0) drawChipStack(ctx, B.x, B.y + 4 * ui, 15 * ui, amt, 8);
     this.flights.render(ctx);
     const r0 = this.cardRects[0];
-    if (this.message && r0 && this.phase !== 'hold') drawPill(ctx, this.message, a.x + a.w / 2, Math.min(r0.y + r0.h + 44 * ui, B.y - 28 * ui), 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.message && r0 && this.phase !== 'hold' && !this.host.result.active) drawPill(ctx, this.message, this.cardsCx, Math.min(r0.y + r0.h + 30 * ui, B.y - 26 * ui), 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
     if (this.betting) this.betCtl.render(ctx, ui);
     this.layer.render(ctx, ui);
   }

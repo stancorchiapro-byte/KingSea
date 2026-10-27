@@ -14,8 +14,8 @@ const goldGrad = (ctx: CanvasRenderingContext2D, x0: number, x1: number) => {
   return g;
 };
 
-export const EXTRA_TOP_5: Partial<Record<PropKind, number>> = { shopRack: 1.6, infoScreen: 1.4, aquarium: 1.2, piano: 0.9, photoSpot: 1.8, telescope: 1.0 };
-export const OVERLAY_5 = new Set<PropKind>(['shopRack', 'infoScreen', 'aquarium', 'photoSpot']);
+export const EXTRA_TOP_5: Partial<Record<PropKind, number>> = { shopRack: 1.6, infoScreen: 1.4, aquarium: 1.2, piano: 0.9, photoSpot: 1.8, telescope: 1.0, raceSim: 1.1, coralVase: 1.2, signpost: 1.6, locksmith: 1.7 };
+export const OVERLAY_5 = new Set<PropKind>(['shopRack', 'infoScreen', 'aquarium', 'photoSpot', 'raceSim', 'locksmith']);
 
 const GARMENTS = ['#1d2a4a', '#5e1426', '#e9dcc0', '#1f4fbf', '#141216', '#c8b28a', '#2b3f6b', '#b0193b'];
 
@@ -56,6 +56,36 @@ export function drawStatic5(ctx: CanvasRenderingContext2D, kind: PropKind, w: nu
       ctx.fillStyle = '#d4af5a'; roundRect(ctx, w / 2 - 24, ct + 11, 48, 10, 2); ctx.fill();
       ctx.fillStyle = '#141216'; ctx.font = 'bold 7px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('BOUTIQUE KS', w / 2, ct + 16.5);
+      return true;
+    }
+    case 'locksmith': {
+      // Échoppe du serrurier : panneau de clés au mur (crochets laiton), établi en noyer, étau, enseigne
+      shadow(ctx, 0, 0, w, h);
+      const top = -TILE * 1.6;
+      ctx.fillStyle = '#3a2618'; roundRect(ctx, 4, top, w - 8, TILE * 1.25, 3); ctx.fill();
+      ctx.strokeStyle = '#d4af5a'; ctx.lineWidth = 1.2; roundRect(ctx, 4, top, w - 8, TILE * 1.25, 3); ctx.stroke();
+      // Clés suspendues (or, argent, cuivre)
+      const cols = ['#e5b54a', '#c9d3dc', '#c27a45', '#e5b54a', '#c9d3dc'];
+      for (let r = 0; r < 2; r++) for (let i = 0; i < 7; i++) {
+        const x = 12 + i * ((w - 24) / 6), y = top + 8 + r * 15, c = cols[(i + r) % cols.length];
+        ctx.fillStyle = '#8a6a2b'; ctx.fillRect(x - 0.6, y - 3, 1.2, 3);
+        ctx.strokeStyle = c; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(x, y + 2, 2.2, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = c; ctx.fillRect(x - 0.7, y + 4, 1.4, 6); ctx.fillRect(x, y + 8, 2, 1.2);
+      }
+      // Établi
+      ctx.fillStyle = '#2b1a14'; roundRect(ctx, 0, 0, w, h - 1, 3); ctx.fill();
+      ctx.fillStyle = '#5a3a22'; ctx.fillRect(1, 0, w - 2, 6);
+      ctx.fillStyle = goldGrad(ctx, 0, w); ctx.fillRect(0, 6, w, 1.4); ctx.fillRect(0, h - 4, w, 1.2);
+      // Étau et machine à reproduire les clés
+      ctx.fillStyle = '#4a5560'; roundRect(ctx, w * 0.1, -9, 16, 9, 2); ctx.fill();
+      ctx.fillStyle = '#8e9aa6'; ctx.fillRect(w * 0.1 + 2, -12, 12, 3);
+      ctx.fillStyle = '#6b2a1e'; roundRect(ctx, w * 0.62, -12, 22, 12, 2); ctx.fill();
+      ctx.fillStyle = '#c9d3dc'; ctx.beginPath(); ctx.arc(w * 0.62 + 7, -6, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#e5b54a'; ctx.fillRect(w * 0.62 + 12, -7, 8, 2);
+      // Enseigne
+      ctx.fillStyle = '#d4af5a'; roundRect(ctx, w / 2 - 26, 10, 52, 10, 2); ctx.fill();
+      ctx.fillStyle = '#141216'; ctx.font = 'bold 7px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('SERRURIER', w / 2, 15.5);
       return true;
     }
     case 'infoScreen': {
@@ -100,6 +130,73 @@ export function drawStatic5(ctx: CanvasRenderingContext2D, kind: PropKind, w: nu
       ctx.fillStyle = '#d4af5a'; ctx.fillRect(w / 2 - 6, h - 4, 12, 1.4);
       return true;
     }
+    case 'raceSim': {
+      // Simulateur de course : grand écran incurvé, deux baquets, volants, néon turquoise
+      const top = -TILE * 1.05;
+      shadow(ctx, 0, 0, w, h);
+      ctx.fillStyle = '#0f1422'; roundRect(ctx, 4, top, w - 8, h * 0.55 - top, 10); ctx.fill();
+      ctx.strokeStyle = '#1fc7c1'; ctx.lineWidth = 2; roundRect(ctx, 4, top, w - 8, h * 0.55 - top, 10); ctx.stroke();
+      ctx.fillStyle = '#05080f'; roundRect(ctx, 12, top + 8, w - 24, h * 0.42 - top - 8, 6); ctx.fill();
+      for (const sx of [w * 0.3, w * 0.7]) {
+        ctx.fillStyle = '#1b1b24'; roundRect(ctx, sx - 16, h * 0.55, 32, h * 0.42, 8); ctx.fill();
+        ctx.fillStyle = '#c0392b'; roundRect(ctx, sx - 12, h * 0.6, 24, h * 0.3, 6); ctx.fill();
+        ctx.strokeStyle = '#d4af5a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sx, h * 0.52, 9, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.fillStyle = '#d4af5a'; ctx.font = 'bold 8px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('CIRCUIT KS', w / 2, h * 0.48);
+      return true;
+    }
+    case 'coralVase': {
+      // Grande vasque en laiton garnie de coraux (rose, corail, violet) et de coquillages nacrés
+      const cx = w / 2, top = -TILE * 1.15;
+      shadow(ctx, 2, 0, w - 4, h - 2);
+      const branch = (x0: number, y0: number, len: number, a: number, d: number, c: string) => {
+        const x1 = x0 + Math.cos(a) * len, y1 = y0 + Math.sin(a) * len;
+        ctx.strokeStyle = c; ctx.lineWidth = Math.max(1.5, d * 1.3); ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        if (d > 0) { branch(x1, y1, len * 0.68, a - 0.5, d - 1, c); branch(x1, y1, len * 0.68, a + 0.42, d - 1, c); }
+      };
+      const vy = h * 0.35;
+      branch(cx - 5, vy, 11, -Math.PI / 2 - 0.35, 3, '#ff6f91');
+      branch(cx + 5, vy, 12, -Math.PI / 2 + 0.3, 3, '#ff9a5a');
+      branch(cx, vy, 14, -Math.PI / 2, 2, '#c38bff');
+      void top;
+      // Vasque
+      const g = ctx.createLinearGradient(4, 0, w - 4, 0);
+      g.addColorStop(0, '#7a5c22'); g.addColorStop(0.45, '#f1dca4'); g.addColorStop(1, '#7a5c22');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.moveTo(3, vy); ctx.lineTo(w - 3, vy); ctx.quadraticCurveTo(w - 6, h * 0.8, cx + 5, h * 0.82); ctx.lineTo(cx - 5, h * 0.82); ctx.quadraticCurveTo(6, h * 0.8, 3, vy); ctx.fill();
+      ctx.fillRect(cx - 3, h * 0.8, 6, h * 0.12); ctx.fillRect(cx - 8, h * 0.9, 16, 3);
+      ctx.fillStyle = '#0d5f6e'; ctx.fillRect(6, vy - 1, w - 12, 3);
+      // Coquillages posés sur le bord
+      for (const [x, c] of [[cx - 9, '#f6dfc9'], [cx + 8, '#ffc6a8']] as const) {
+        ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, vy, 3.2, Math.PI, 0); ctx.closePath(); ctx.fill();
+      }
+      return true;
+    }
+    case 'signpost': {
+      // Totem d'orientation : mât laqué marine, flèches dorées vers les escaliers et l'ascenseur
+      const cx = w / 2, top = -TILE * 1.55;
+      shadow(ctx, 4, 0, w - 8, h - 2);
+      ctx.fillStyle = '#0e1d33'; roundRect(ctx, cx - 3, top + 4, 6, h - top - 8, 2); ctx.fill();
+      ctx.fillStyle = goldGrad(ctx, cx - 8, cx + 8); ctx.fillRect(cx - 8, h - 6, 16, 3);
+      const sign = (y: number, dir: -1 | 1 | 0, label: string) => {
+        const sw = w + 12, sx = cx - sw / 2;
+        ctx.fillStyle = '#10243f';
+        ctx.beginPath();
+        if (dir === 0) roundRect(ctx, sx, y, sw, 9, 2);
+        else if (dir > 0) { ctx.moveTo(sx, y); ctx.lineTo(sx + sw - 4, y); ctx.lineTo(sx + sw + 1, y + 4.5); ctx.lineTo(sx + sw - 4, y + 9); ctx.lineTo(sx, y + 9); ctx.closePath(); }
+        else { ctx.moveTo(sx + sw, y); ctx.lineTo(sx + 4, y); ctx.lineTo(sx - 1, y + 4.5); ctx.lineTo(sx + 4, y + 9); ctx.lineTo(sx + sw, y + 9); ctx.closePath(); }
+        ctx.fill(); ctx.strokeStyle = '#d4af5a'; ctx.lineWidth = 0.8; ctx.stroke();
+        ctx.fillStyle = '#efdcae'; ctx.font = 'bold 5px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(label, cx, y + 4.8);
+      };
+      sign(top + 2, 0, 'ASCENSEUR');
+      sign(top + 13, 1, 'CASINO');
+      sign(top + 24, -1, 'MACHINES');
+      ctx.fillStyle = '#d4af5a'; ctx.beginPath(); ctx.arc(cx, top + 1, 2.2, 0, Math.PI * 2); ctx.fill();
+      return true;
+    }
     case 'telescope': {
       // Longue-vue en laiton sur trépied
       const top = -TILE * 0.9, cx = w / 2;
@@ -137,6 +234,18 @@ export function drawStatic5(ctx: CanvasRenderingContext2D, kind: PropKind, w: nu
 export function drawOverlay5(ctx: CanvasRenderingContext2D, p: PropDef, t: number, lowFx: boolean): void {
   const w = p.w * TILE, h = p.h * TILE;
   switch (p.kind) {
+    case 'locksmith': {
+      // Reflet qui passe sur les clés, étincelle de la meuleuse de temps en temps
+      if (lowFx) return;
+      const k = (t * 0.35) % 1, x = 8 + k * (w - 16), top = -TILE * 1.6;
+      ctx.fillStyle = 'rgba(255,240,200,0.35)'; ctx.fillRect(x - 3, top + 4, 6, TILE * 1.1);
+      if (Math.sin(t * 1.7) > 0.85) {
+        ctx.fillStyle = '#ffd27a';
+        for (let i = 0; i < 4; i++) { const a = -Math.PI / 2 + (i - 1.5) * 0.4; ctx.fillRect(w * 0.62 + 7 + Math.cos(a) * (5 + (t * 40 + i * 3) % 6), -6 + Math.sin(a) * (5 + (t * 40 + i * 3) % 6), 1.2, 1.2); }
+      }
+      void h;
+      return;
+    }
     case 'shopRack': {
       // Scintillement doux sur le mannequin
       if (lowFx) return;
@@ -147,13 +256,13 @@ export function drawOverlay5(ctx: CanvasRenderingContext2D, p: PropDef, t: numbe
       return;
     }
     case 'infoScreen': {
-      // Écran : programme du jour qui défile (heure locale, étages)
+      // Écran : programme du bord qui défile (étages)
       const top = -TILE * 1.3, sx = 5, sy = top + 3, sw = w - 10, sh = 28;
       const g = ctx.createLinearGradient(0, sy, 0, sy + sh); g.addColorStop(0, '#0f2a4a'); g.addColorStop(1, '#091a30');
       ctx.fillStyle = g; ctx.fillRect(sx, sy, sw, sh);
-      const d = new Date(), hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
-      ctx.fillStyle = '#efdcae'; ctx.font = 'bold 8px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(`${hh}:${mm}`, sx + 3, sy + 6);
+      // Bandeau du navire (aucune heure affichée dans le jeu)
+      ctx.fillStyle = '#efdcae'; ctx.font = 'bold 7px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('À BORD', sx + 3, sy + 6);
       ctx.fillStyle = '#1fc7c1'; ctx.textAlign = 'right'; ctx.fillText('KS', sx + sw - 3, sy + 6);
       const lines = ['Casino · 1er', 'Arcade · 2e', 'Cabines · 3e', 'Rooftop · 4e', 'Boutique · RDC'];
       const k = Math.floor(t / 2.5) % lines.length, f = (t % 2.5) / 2.5;
@@ -188,6 +297,21 @@ export function drawOverlay5(ctx: CanvasRenderingContext2D, p: PropDef, t: numbe
           ctx.beginPath(); ctx.arc(x + Math.sin(t * 3 + i) * 1.2, y, 1 + i * 0.2, 0, Math.PI * 2); ctx.stroke();
         }
       }
+      return;
+    }
+    case 'raceSim': {
+      // Écran : une petite voiture tourne sur un circuit ovale
+      const top = -TILE * 1.05, sx = 12, sy = top + 8, sw = w - 24, sh = h * 0.42 - top - 8;
+      ctx.save(); ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
+      ctx.fillStyle = '#0b4f7a'; ctx.fillRect(sx, sy, sw, sh);
+      ctx.strokeStyle = '#3b3f48'; ctx.lineWidth = 7; ctx.beginPath(); ctx.ellipse(w / 2, sy + sh / 2, sw * 0.36, sh * 0.32, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+      for (const [k, c] of [[0, '#d4af5a'], [0.6, '#1fc7c1']] as const) {
+        const a = t * 1.6 + k * Math.PI;
+        ctx.fillStyle = c; ctx.beginPath(); ctx.arc(w / 2 + Math.cos(a) * sw * 0.36, sy + sh / 2 + Math.sin(a) * sh * 0.32, 3, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+      if (!lowFx) { ctx.fillStyle = `rgba(31,199,193,${0.12 + 0.08 * Math.sin(t * 3)})`; ctx.fillRect(4, h * 0.55 - 2, w - 8, 3); }
       return;
     }
     case 'photoSpot': {

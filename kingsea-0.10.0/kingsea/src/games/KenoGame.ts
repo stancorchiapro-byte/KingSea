@@ -1,6 +1,6 @@
 // Keno : choisis 1 à 10 numéros sur 80, 20 numéros sont tirés (par l'autorité). La table des gains suit le nombre
 // de numéros joués. Tirage animé boule par boule, numéros trouvés mis en évidence, gain en direct dans la table.
-import { roundRect } from '../art/canvas';
+import { makeCanvas, roundRect } from '../art/canvas';
 import { PAL } from '../art/palette';
 import type { PointerHandler, PointerInfo } from '../engine/Input';
 import { ButtonLayer, makeButton, type Button } from '../ui/UIKit';
@@ -11,10 +11,13 @@ import { drawLabel, drawPill } from './widgets';
 import { BetControl } from './casinoKit';
 import { goldGradient, LUXE } from '../art/brand';
 
-const BALL_TIME = 0.2;
+const BALL_TIME = 0.26;
+/** Boules du boulier (positions de départ fixes, mouvement calculé). */
+const BLOWER = Array.from({ length: 16 }, (_, i) => ({ a: (i * 2.399) % (Math.PI * 2), r: 0.25 + ((i * 37) % 60) / 100, sp: 0.8 + ((i * 13) % 9) / 6, n: 1 + ((i * 29) % 80) }));
 
 export class KenoGame implements MiniGame {
   readonly id = 'keno';
+  readonly tableGame = 'keno';
   readonly title = 'Keno';
   readonly bg: [string, string] = ['#18121a', '#060407'];
   readonly currency = 'chips' as const;
@@ -26,6 +29,9 @@ export class KenoGame implements MiniGame {
   private layer = new ButtonLayer(6);
   private betCtl!: BetControl;
   private hitPulse = new Map<number, number>();
+  /** Grille de base (cases et numéros non joués) pré-rendue : seules les cases jouées ou tirées sont redessinées. */
+  private gridImg: { key: string; c: ReturnType<typeof makeCanvas> } | null = null;
+  private t = 0;
   private picks: number[] = [];
   private drawn: number[] = [];
   private shown = 0;
@@ -99,7 +105,7 @@ export class KenoGame implements MiniGame {
     this.reset();
     this.waiting = true;
     const bet = this.betCtl.amount;
-    const r = await s.ask('casino', 'keno', 'play', { picks: [...this.picks], bet });
+    const r = await this.host.playRound('keno', 'play', { picks: [...this.picks], bet }, bet, () => this.host.toasts.show('Mise acceptée : tirage commun à la fin du compte à rebours'));
     this.waiting = false;
     if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
     this.betCtl.remember(bet);
@@ -108,17 +114,19 @@ export class KenoGame implements MiniGame {
 
   update(dt: number): void {
     const s = this.host.s;
+    this.t += dt;
     if (this.phase === 'draw') {
       this.revealT += dt;
       if (this.revealT > BALL_TIME && this.shown < 20) {
         this.shown++; this.revealT = 0;
         const n = this.drawn[this.shown - 1];
-        if (this.picks.includes(n)) { s.audio.coin(); this.hitPulse.set(n, 1); } else s.audio.tick();
+        s.audio.ballPop();
+        if (this.picks.includes(n)) { s.audio.coin(); this.hitPulse.set(n, 1); }
       }
       if (this.shown >= 20 && this.revealT > 0.5) {
         const win = this.settled.payout, hits = this.picks.filter((n) => this.drawn.includes(n)).length;
         this.message = `${hits} / ${this.picks.length} trouvé${hits > 1 ? 's' : ''} · ${win > 0 ? `+${win} jetons` : 'pas de gain'}`;
-        if (win > this.settled.stake) s.audio.win(); else if (win === 0) s.audio.lose();
+        this.host.celebrate(win - this.settled.stake, this.settled.stake, `${hits} / ${this.picks.length} trouvé${hits > 1 ? 's' : ''}`);
         this.phase = 'done';
       }
     }
@@ -133,8 +141,24 @@ export class KenoGame implements MiniGame {
   render(ctx: CanvasRenderingContext2D): void {
     const ui = this.host.vp.ui, G = this.grid, shownSet = new Set(this.drawn.slice(0, this.shown));
     const last = this.shown > 0 ? this.drawn[this.shown - 1] : 0;
-    // Grille : cases laquées, numéros joués en or, tirés en bordeaux, trouvés en or brillant
-    for (let n = 1; n <= 80; n++) {
+    // Grille : base pré-rendue, puis cases jouées (or), tirées (bordeaux), trouvées (or brillant)
+    const dpr = Math.max(1, Math.abs(ctx.getTransform().a));
+    const key = `${G.cw}x${G.ch}@${dpr}`;
+    if (this.gridImg?.key !== key) {
+      const c = makeCanvas(Math.ceil(G.cw * 10 * dpr), Math.ceil(G.ch * 8 * dpr)), g = c.ctx;
+      g.scale(dpr, dpr);
+      for (let n = 1; n <= 80; n++) {
+        const x = ((n - 1) % 10) * G.cw, y = Math.floor((n - 1) / 10) * G.ch;
+        roundRect(g, x + 2, y + 2, G.cw - 4, G.ch - 4, 6 * ui);
+        const cg = g.createLinearGradient(0, y, 0, y + G.ch); cg.addColorStop(0, 'rgba(255,255,255,0.09)'); cg.addColorStop(1, 'rgba(255,255,255,0.03)');
+        g.fillStyle = cg; g.fill(); g.strokeStyle = 'rgba(212,175,90,0.18)'; g.lineWidth = 1; g.stroke();
+        drawLabel(g, String(n), x + G.cw / 2, y + G.ch / 2, Math.min(G.ch * 0.42, 15 * ui), PAL.text, 'center', 800);
+      }
+      this.gridImg = { key, c };
+    }
+    ctx.drawImage(this.gridImg.c.canvas as CanvasImageSource, G.x, G.y, G.cw * 10, G.ch * 8);
+    const gold = goldGradient(ctx, G.x, G.y, G.x + G.cw * 10, G.y + G.ch * 8);
+    for (const n of new Set([...this.picks, ...shownSet])) {
       const col = (n - 1) % 10, row = Math.floor((n - 1) / 10);
       const x = G.x + col * G.cw, y = G.y + row * G.ch;
       const picked = this.picks.includes(n), drawn = shownSet.has(n), hit = picked && drawn;
@@ -142,18 +166,40 @@ export class KenoGame implements MiniGame {
       ctx.save();
       ctx.translate(x + G.cw / 2, y + G.ch / 2); ctx.scale(1 + grow * 0.15, 1 + grow * 0.15);
       roundRect(ctx, -G.cw / 2 + 2, -G.ch / 2 + 2, G.cw - 4, G.ch - 4, 6 * ui);
-      ctx.fillStyle = hit ? goldGradient(ctx, -G.cw / 2, -G.ch / 2, G.cw / 2, G.ch / 2) : drawn ? '#7a1f33' : picked ? 'rgba(212,175,90,0.28)' : 'rgba(255,255,255,0.06)';
-      if (hit && pulse > 0) { ctx.shadowColor = 'rgba(255,230,160,0.9)'; ctx.shadowBlur = 14 * pulse; }
-      ctx.fill(); ctx.shadowBlur = 0;
+      ctx.fillStyle = hit ? gold : drawn ? '#7a1f33' : 'rgba(212,175,90,0.28)';
+      ctx.fill();
       ctx.strokeStyle = picked ? 'rgba(239,220,174,0.9)' : 'rgba(212,175,90,0.18)'; ctx.lineWidth = picked ? 1.6 : 1; ctx.stroke();
       drawLabel(ctx, String(n), 0, 0, Math.min(G.ch * 0.42, 15 * ui), hit ? '#1a1208' : picked ? LUXE.champagne : PAL.text, 'center', 800);
       ctx.restore();
+      // Onde dorée quand un numéro joué est tiré
+      if (hit && pulse > 0) {
+        ctx.strokeStyle = `rgba(255,226,154,${pulse})`; ctx.lineWidth = 2;
+        const rr = (1 - pulse) * G.cw * 0.9 + G.cw * 0.3;
+        ctx.beginPath(); ctx.arc(x + G.cw / 2, y + G.ch / 2, rr, 0, Math.PI * 2); ctx.stroke();
+      }
     }
     // Panneau : boule tirée, compteur, table des gains en direct
     const S = this.side, k = this.picks.length;
     roundRect(ctx, S.x, S.y, S.w, S.h, 12 * ui); ctx.fillStyle = 'rgba(10,8,12,0.7)'; ctx.fill();
     ctx.strokeStyle = 'rgba(212,175,90,0.4)'; ctx.lineWidth = 1; ctx.stroke();
     let top = S.y + 10 * ui;
+    // Boulier : dôme de verre où les boules s'agitent pendant le tirage
+    const domeR = Math.min(S.w * 0.16, 34 * ui), dx = S.x + S.w - domeR - 12 * ui, dy = S.y + domeR + 10 * ui;
+    {
+      const agit = this.phase === 'draw' ? 1 : 0.15;
+      ctx.save();
+      ctx.beginPath(); ctx.arc(dx, dy, domeR, 0, Math.PI * 2); ctx.fillStyle = 'rgba(160,210,255,0.08)'; ctx.fill(); ctx.clip();
+      for (const b of BLOWER) {
+        const a = b.a + this.t * b.sp * (0.4 + agit * 3), rr = domeR * b.r * (0.8 + 0.2 * Math.sin(this.t * 5 * agit + b.n));
+        const bx = dx + Math.cos(a) * rr, by = dy + Math.sin(a * 1.3) * rr * 0.9, br = domeR * 0.17;
+        ctx.fillStyle = b.n % 3 === 0 ? '#f3e2b3' : '#efeae2'; ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 0.8; ctx.stroke();
+      }
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(220,240,255,0.55)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(dx, dy, domeR, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(dx, dy, domeR * 0.8, Math.PI * 1.1, Math.PI * 1.45); ctx.stroke();
+      ctx.fillStyle = goldGradient(ctx, dx - domeR, 0, dx + domeR, 0); ctx.fillRect(dx - domeR * 0.7, dy + domeR - 2, domeR * 1.4, 6 * ui);
+    }
     if (this.phase !== 'pick' && this.shown > 0) {
       const br = Math.min(22 * ui, S.w * 0.12), bx = S.x + br + 12 * ui, by = top + br;
       const hitNow = this.picks.includes(last);
@@ -166,9 +212,10 @@ export class KenoGame implements MiniGame {
       drawLabel(ctx, `${hits} trouvé${hits > 1 ? 's' : ''} sur ${k}`, bx + br + 10 * ui, by + 9 * ui, 11.5 * ui, LUXE.champagne, 'left', 700);
       top = by + br + 10 * ui;
     } else {
-      drawLabel(ctx, k ? `${k} numéro${k > 1 ? 's' : ''} joué${k > 1 ? 's' : ''}` : 'Aucun numéro', S.x + S.w / 2, top + 8 * ui, 13 * ui, LUXE.champagne);
+      drawLabel(ctx, k ? `${k} numéro${k > 1 ? 's' : ''} joué${k > 1 ? 's' : ''}` : 'Aucun numéro', S.x + 12 * ui, top + 12 * ui, 13 * ui, LUXE.champagne, 'left');
       top += 24 * ui;
     }
+    top = Math.max(top, dy + domeR + 12 * ui);
     if (k) {
       const table = KENO_PAY[k], rows = table.map((m, h) => [h, m] as const).filter(([, m]) => m > 0).reverse();
       const lh = Math.min(22 * ui, (S.y + S.h - 60 * ui - top) / Math.max(1, rows.length));
@@ -182,7 +229,7 @@ export class KenoGame implements MiniGame {
       });
       drawLabel(ctx, `Retour théorique ${(kenoRtp(k) * 100).toFixed(1).replace('.', ',')} %`, S.x + S.w / 2, S.y + S.h - 12 * ui, 10 * ui, PAL.textDim, 'center', 600);
     }
-    if (this.message) drawPill(ctx, this.message, S.x + S.w / 2, S.y + S.h - 34 * ui, Math.min(12 * ui, S.w / 22), 'rgba(14,11,16,0.92)', PAL.text);
+    if (this.message && !this.host.result.active) drawPill(ctx, this.message, S.x + S.w / 2, S.y + S.h - 34 * ui, Math.min(12 * ui, S.w / 22), 'rgba(14,11,16,0.92)', PAL.text);
     this.betCtl.render(ctx, ui);
     this.layer.render(ctx, ui);
   }

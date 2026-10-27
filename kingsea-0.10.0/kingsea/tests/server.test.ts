@@ -52,6 +52,8 @@ async function player(port: number, name: string, password = 'secret123') {
   return { c, auth, id: (auth.profile as { id: string }).id, token: auth.token as string };
 }
 let reqN = 0;
+/** KS Pass Croisière (réception) : nécessaire pour quitter le hall. */
+const pass = (c: TestClient) => req(c, 'purser', 'purser', 'gift', {});
 const req = (c: TestClient, kind: string, game: string, action: string, input: unknown, id = `t${++reqN}abc`) => {
   c.send({ t: 'req', req: { kind, game, action, input, id } });
   return c.wait((m) => m.t === 'res' && m.id === id).then((m) => m.reply as { ok: boolean; balance: number; payout: number; stake: number; view: Record<string, unknown>; error?: string });
@@ -104,7 +106,10 @@ test('présence : entrer dans un étage, voir les autres, déplacements synchron
   a.c.send({ t: 'move', x: 30 * 32, y: 16 * 32, dir: 'right', anim: 'walk' });
   const cor = await a.c.wait((m) => m.t === 'correct');
   assert.equal(cor.x, 17 * 32 + 10);
-  // Changement d'étage : les autres voient le départ
+  // Changement d'étage : refusé sans KS Pass, puis accepté ; les autres voient le départ
+  a.c.send({ t: 'join', floor: 'casino', x: 17 * 32, y: 4 * 32 });
+  assert.match(String((await a.c.wait((m) => m.t === 'notice')).msg), /KS Pass/);
+  assert.ok((await pass(a.c)).ok);
   a.c.send({ t: 'join', floor: 'casino', x: 17 * 32, y: 4 * 32 });
   const leave = await b.c.wait((m) => m.t === 'leave');
   assert.equal(leave.id, a.id);
@@ -120,6 +125,7 @@ test('chat : diffusion dans l\'étage, insultes masquées, anti-spam, blocage, s
   const a = await player(port, 'Capitaine');
   const b = await player(port, 'Mousse');
   const c = await player(port, 'Ailleurs');
+  await pass(c.c);
   for (const [p, f] of [[a, 'hub'], [b, 'hub'], [c, 'arcade']] as const) { p.c.send({ t: 'join', floor: f, x: 17 * 32, y: 4 * 32 }); await p.c.wait((m) => m.t === 'room'); }
   a.c.send({ t: 'chat', text: 'Bonjour à bord, espèce de connard !' });
   const got = await b.c.wait((m) => m.t === 'chat');
@@ -180,6 +186,7 @@ test('cabines : une par joueur, jamais partagée ; intérieur privé', async () 
   b.c.send({ t: 'cabin' }); const cb = await b.c.wait((m) => m.t === 'cabin');
   assert.ok(ca.id && cb.id && ca.id !== cb.id);
   a.c.send({ t: 'cabin' }); assert.equal((await a.c.wait((m) => m.t === 'cabin')).id, ca.id);
+  await pass(a.c); await pass(b.c);
   a.c.send({ t: 'join', floor: 'cabin-interior', x: 7 * 32, y: 7 * 32 }); await a.c.wait((m) => m.t === 'room');
   b.c.send({ t: 'join', floor: 'cabin-interior', x: 7 * 32, y: 7 * 32 });
   const rb = await b.c.wait((m) => m.t === 'room');
@@ -194,7 +201,7 @@ test('déconnexion en pleine main de blackjack : réglée à la reconnexion, une
   for (let i = 0; i < 20 && !open; i++) {
     const r = await req(a.c, 'casino', 'blackjack', 'deal', { bet: 20 });
     assert.ok(r.ok);
-    open = r.view.phase === 'player'; before = r.balance;
+    open = r.view.phase === 'player' || r.view.phase === 'insurance'; before = r.balance;
   }
   assert.ok(open);
   a.c.close();
@@ -400,6 +407,7 @@ test('chat : proximité (portée de voix), global (niveau 2, délai), historique
   const prof = store.profile(pre.id)!; prof.progress = { ...prof.progress!, xp: 200, level: 2 }; store.save(prof);
   const a = await login('Amirale');
   const near = await player(port, 'Voisin'), far = await player(port, 'Lointain'), other = await player(port, 'Ailleurs');
+  await pass(other.c);
   for (const [p, f, x] of [[a, 'hub', 10], [near, 'hub', 12], [far, 'hub', 30], [other, 'arcade', 10]] as const) { p.c.send({ t: 'join', floor: f, x: x * 32, y: 6 * 32 }); await p.c.wait((m) => m.t === 'room'); }
   // Proximité : le voisin (2 cases) reçoit, le joueur à 20 cases et l'autre étage non
   a.c.send({ t: 'chat', text: 'Salut les voisins', scope: 'near' });

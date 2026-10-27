@@ -1,6 +1,6 @@
 {
   "name": "kingsea",
-  "version": "0.10.0",
+  "version": "0.14.0",
   "private": true,
   "description": "KingSea (KS) — jeu social mobile 2D sur un bateau de croisière. Android & iOS via Capacitor.",
   "type": "module",

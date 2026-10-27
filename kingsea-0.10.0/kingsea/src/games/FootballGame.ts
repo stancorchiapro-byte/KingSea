@@ -157,8 +157,7 @@ export class FootballGame implements MiniGame {
     const goals = this.results.filter((r) => r === 'goal').length;
     drawPill(ctx, `Buts ${goals} / ${this.results.length}`, a.x + a.w - 70 * ui, a.y + a.h - 14 * ui, 14 * ui, 'rgba(0,0,0,0.6)', PAL.goldLight);
     if (sh && sh.t > 0.5) drawPill(ctx, LABELS[sh.outcome], G.cx, G.bottom + 30 * ui, 18 * ui, sh.outcome === 'goal' ? 'rgba(46,139,87,0.9)' : 'rgba(14,11,16,0.9)', '#fff');
-    if (this.phase === 'aim' && !this.drag && this.results.length === 0) drawPill(ctx, 'Glisse du ballon vers le but — geste long = tir haut', G.cx, G.bottom + 30 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
-    if (this.phase === 'ready') drawPill(ctx, '10 tirs au but face au gardien', G.cx, G.bottom + 30 * ui, 14 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.phase === 'aim' && !this.drag && this.results.length === 0) drawPill(ctx, 'Glisse du ballon vers le but — geste long = tir haut', G.cx, G.bottom + 30 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text, a.w - 16 * ui);
     if (this.phase === 'ready' || this.phase === 'over') this.card.render(ctx, ui, this.phase === 'over');
     this.layer.render(ctx, ui);
   }

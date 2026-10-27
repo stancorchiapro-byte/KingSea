@@ -56,6 +56,10 @@ export const cabinsFloor: FloorDef = {
     { kind: 'bench', tx: 29, ty: 14, w: 2, h: 1, solid: true, interact: { id: 'sit', label: 'S’asseoir', at: { x: 30, y: 14.2 }, radius: 1.4 } },
     { kind: 'plant', tx: 1, ty: 14, w: 1, h: 1, solid: true },
     { kind: 'plant', tx: 38, ty: 14, w: 1, h: 1, solid: true },
+    // Tableau d'annonces : visites, sonnette, clés
+    { kind: 'noticeBoard', tx: 24, ty: 14, w: 2, h: 1, solid: true, interact: { id: 'notice-board', label: 'Petites annonces', at: { x: 25, y: 13.6 }, radius: 1.4 } },
+    // Serrurier : doubles de clé et changement de serrure
+    { kind: 'locksmith', tx: 33, ty: 13, w: 3, h: 2, solid: true, interact: { id: 'locksmith', label: 'Serrurier', at: { x: 34.5, y: 12.6 }, radius: 1.7 } },
     { kind: 'plant', tx: 14, ty: 14, w: 1, h: 1, solid: true },
     { kind: 'plant', tx: 25, ty: 14, w: 1, h: 1, solid: true },
   ],
@@ -75,6 +79,7 @@ export const cabinsFloor: FloorDef = {
       { x: 10, y: 13.5, radius: 3, color: '255,226,180' },
       { x: 20, y: 13.5, radius: 3, color: '255,226,180' },
       { x: 30, y: 13.5, radius: 3, color: '255,226,180' },
+      { x: 34.5, y: 12.8, radius: 3.4, color: '255,214,150' },
       { x: 1.5, y: 3.5, radius: 3, color: '255,236,200' },
       { x: 38.5, y: 3.5, radius: 3, color: '255,236,200' },
     ],

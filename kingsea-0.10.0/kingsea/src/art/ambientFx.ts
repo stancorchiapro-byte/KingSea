@@ -16,12 +16,16 @@ export interface FxContext {
   t: number;
   poolTiles: Array<{ x: number; y: number }>;
   danceRect: { x: number; y: number; w: number; h: number } | null;
+  /** Taille de la carte (monde) : les effets au sol ne débordent pas dans le vide. */
+  bounds?: { w: number; h: number };
 }
 
 const MAX = 70;
 const NEON = ['#ff3fa4', '#6ff3ff', '#7b4dff', '#ffd166', '#59e3a7'];
 
 export class AmbientFx {
+  /** « Effets réduits » : coupe les effets décoratifs coûteux. */
+  lowFx = false;
   private motes: Mote[] = [];
   private acc = 0;
   private lastBeatBar = -1;
@@ -105,6 +109,24 @@ export class AmbientFx {
         g.addColorStop(0, `rgba(255,240,200,${0.16 * pulse})`); g.addColorStop(1, 'rgba(255,240,200,0)');
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.moveTo(w.x + 3, y0); ctx.lineTo(w.x + w.w - 3, y0); ctx.lineTo(w.x + w.w + TILE * 0.9, y0 + len); ctx.lineTo(w.x + TILE * 0.5, y0 + len); ctx.closePath(); ctx.fill();
+      }
+      // Hall : reflets d'eau (caustiques) qui ondulent doucement sur le sol, comme sous une verrière marine
+      if (c.floorId === 'hub' && !this.lowFx) {
+        const V = c.view, step = TILE * 2.2, B = c.bounds ?? { w: 1e9, h: 1e9 };
+        ctx.beginPath(); ctx.rect(TILE, TILE * 2, B.w - TILE * 2, B.h - TILE * 3); ctx.clip();
+        const x0 = Math.floor(V.x / step) * step, y0 = Math.floor(V.y / step) * step;
+        for (let y = y0; y < V.y + V.h + step; y += step) {
+          for (let x = x0; x < V.x + V.w + step; x += step) {
+            const ph = (x * 0.013 + y * 0.021);
+            const a = 0.035 + 0.03 * Math.sin(c.t * 0.9 + ph * 3.1);
+            if (a <= 0.012) continue;
+            const ox = x + Math.sin(c.t * 0.55 + ph) * TILE * 0.5, oy = y + Math.cos(c.t * 0.47 + ph * 1.3) * TILE * 0.4;
+            ctx.strokeStyle = `rgba(150,235,255,${a})`; ctx.lineWidth = 2.2;
+            ctx.beginPath();
+            ctx.ellipse(ox, oy, TILE * (0.7 + 0.2 * Math.sin(c.t + ph)), TILE * 0.32, Math.sin(ph) * 0.8, 0, Math.PI * 1.4);
+            ctx.stroke();
+          }
+        }
       }
       ctx.restore();
     }

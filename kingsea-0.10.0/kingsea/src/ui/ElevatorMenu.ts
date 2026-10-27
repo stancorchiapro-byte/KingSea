@@ -33,13 +33,15 @@ export class ElevatorMenu extends Modal {
     return FLOORS.map((f, i) => {
       const col = Math.floor(i / rows), row = i % rows;
       const here = f.id === this.currentId;
-      const sub = here ? `${floorLabel(f)} · Vous êtes ici` : f.available ? `${floorLabel(f)} · ${f.description}` : `${floorLabel(f)} · En construction (phase ${f.plannedPhase ?? 2})`;
+      // Accès vérifié comme au serveur : KS Pass Croisière, niveau des espaces réservés
+      const acc = this.s.floorAccess(f.id);
+      const sub = here ? `${floorLabel(f)} · Vous êtes ici` : !f.available ? `${floorLabel(f)} · En construction (phase ${f.plannedPhase ?? 2})` : !acc.ok ? `${floorLabel(f)} · ${acc.needPass ? 'KS Pass requis (réception)' : acc.reason}` : `${floorLabel(f)} · ${f.description}`;
       return makeButton({
         id: `floor-${f.id}`,
         label: `${f.short === 'RDC' ? 'RDC' : f.short}  ${f.name}`,
         sub,
-        style: f.available ? 'secondary' : 'disabled',
-        enabled: f.available && !here,
+        style: f.available && acc.ok ? 'secondary' : 'disabled',
+        enabled: f.available && !here && acc.ok,
         active: here,
         x: this.content.x + col * (bw + gap), y: this.content.y + row * (bh + gap), w: bw, h: bh,
         fontSize: 15,

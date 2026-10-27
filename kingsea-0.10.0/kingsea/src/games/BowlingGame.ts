@@ -30,7 +30,7 @@ export class BowlingGame implements MiniGame {
   readonly bg: [string, string] = ['#1a1238', '#07040f'];
   readonly rules =
     '10 frames, 2 lancers par frame (3 possibles à la 10e).\n• Glisse la boule vers le haut ou le bas pour la placer.\n' +
-    '• Tire-la vers la gauche puis relâche : plus tu tires, plus elle va vite. L’angle du geste donne la direction.\n' +
+    '• Tire-la vers l’arrière (gauche en paysage, bas en portrait) puis relâche : plus tu tires, plus elle va vite. L’angle du geste donne la direction.\n' +
     '• Strike (X) : 10 + les 2 lancers suivants. Spare (/) : 10 + le lancer suivant.\nRécompense : 1 KSCoin pour 5 points (plafond quotidien commun aux mini-jeux).';
 
   private host!: MiniGameHost;
@@ -45,8 +45,10 @@ export class BowlingGame implements MiniGame {
   private settleT = 0;
   private aim: { id: number; sx: number; sy: number; x: number; y: number; placing: boolean } | null = null;
   private view = { x: 0, y: 0, s: 1 };
+  /** Portrait : la piste est tournée d'un quart de tour (quilles en haut) autour de ce centre. */
+  private rot: { cx: number; cy: number } | null = null;
   private sheet = { x: 0, y: 0, w: 0, h: 0 };
-  private message = 'Tire la boule vers la gauche, vise, relâche !';
+  private message = this.pullHint;
   private result: string | null = null;
   private handler: PointerHandler;
   private hitSound = 0;
@@ -54,7 +56,7 @@ export class BowlingGame implements MiniGame {
   private rest: Array<{ x: number; y: number }> = [];
 
   constructor() {
-    this.handler = { onDown: (p) => this.down(p), onMove: (p) => this.move(p), onUp: (p) => this.up(p) };
+    this.handler = { onDown: (p) => this.down(this.virt(p)), onMove: (p) => this.move(this.virt(p)), onUp: (p) => this.up(this.virt(p)) };
   }
 
   init(host: MiniGameHost): void {
@@ -70,7 +72,7 @@ export class BowlingGame implements MiniGame {
     this.againBtn.visible = false;
     this.rackAll();
     this.resetBall();
-    this.message = 'Tire la boule vers la gauche, vise, relâche !';
+    this.message = this.pullHint;
   }
 
   /** Quilles légèrement irrégulières (position, poids) : chaque lancer est différent, le strike se mérite. */
@@ -91,13 +93,36 @@ export class BowlingGame implements MiniGame {
     const sheetH = 58 * ui;
     this.sheet = { x: a.x, y: a.y, w: a.w, h: sheetH };
     const avH = a.h - sheetH - 20 * ui;
-    const s = Math.min(a.w / (LANE + 40), avH / (HALF * 2 + GUTTER * 2 + 20));
-    this.view = { x: a.x + (a.w - LANE * s) / 2, y: a.y + sheetH + 10 * ui + avH / 2, s };
+    const cy = a.y + sheetH + 10 * ui + avH / 2, cx = a.x + a.w / 2;
+    if (a.h > a.w * 1.2) {
+      // Portrait : piste verticale (repère virtuel horizontal tourné de −90° autour du centre de la zone)
+      this.rot = { cx, cy };
+      const vw = avH - 30 * ui, vh = a.w - 8 * ui;
+      const s = Math.min(vw / (LANE + 30), vh / (HALF * 2 + GUTTER * 2 + 10));
+      this.view = { x: cx - (LANE * s) / 2, y: cy, s };
+    } else {
+      this.rot = null;
+      const s = Math.min(a.w / (LANE + 40), avH / (HALF * 2 + GUTTER * 2 + 20));
+      this.view = { x: a.x + (a.w - LANE * s) / 2, y: cy, s };
+    }
+    if (this.message.startsWith('Tire la boule vers')) this.message = this.pullHint;
     Object.assign(this.againBtn, { x: a.x + a.w / 2 - 100 * ui, y: a.y + a.h - 60 * ui, w: 200 * ui, h: 54 * ui });
   }
 
   handlers(): PointerHandler[] { return [this.handler, this.layer]; }
   canQuit() { return { ok: true as const }; }
+
+  private get pullHint(): string { return `Tire la boule vers ${this.rot ? 'le bas' : 'la gauche'}, vise, relâche !`; }
+  /** Pointeur écran → repère virtuel (identique en paysage). */
+  private virt(p: PointerInfo): PointerInfo {
+    const R = this.rot; if (!R) return p;
+    return { ...p, x: R.cx - (p.y - R.cy), y: R.cy + (p.x - R.cx) };
+  }
+  /** Repère virtuel → écran. */
+  private real(x: number, y: number): { x: number; y: number } {
+    const R = this.rot; if (!R) return { x, y };
+    return { x: R.cx + (y - R.cy), y: R.cy - (x - R.cx) };
+  }
 
   private toWorld(px: number, py: number) { return { x: (px - this.view.x) / this.view.s, y: (py - this.view.y) / this.view.s }; }
   private toScreen(x: number, y: number) { return { x: this.view.x + x * this.view.s, y: this.view.y + y * this.view.s }; }
@@ -127,7 +152,7 @@ export class BowlingGame implements MiniGame {
     if (a.placing) return;
     const dx = (a.sx - p.x) / this.view.s, dy = (a.sy - p.y) / this.view.s;
     const pull = Math.hypot(dx, dy);
-    if (pull < 18 || dx <= 0) { this.message = 'Tire davantage vers la gauche pour lancer.'; return; }
+    if (pull < 18 || dx <= 0) { this.message = `Tire davantage vers ${this.rot ? 'le bas' : 'la gauche'} pour lancer.`; return; }
     const angle = clamp(Math.atan2(dy, dx), -0.2, 0.2);
     const power = clamp(pull / 140, 0.25, 1);
     const speed = 240 + power * 420;
@@ -198,6 +223,9 @@ export class BowlingGame implements MiniGame {
   render(ctx: CanvasRenderingContext2D): void {
     const ui = this.host.vp.ui, v = this.view, s = v.s;
     this.renderSheet(ctx, ui);
+    ctx.save();
+    if (this.rot) { ctx.translate(this.rot.cx, this.rot.cy); ctx.rotate(-Math.PI / 2); ctx.translate(-this.rot.cx, -this.rot.cy); }
+    let forcePill: { x: number; y: number; text: string } | null = null;
     // Piste
     const p0 = this.toScreen(0, -HALF - GUTTER);
     ctx.fillStyle = '#2b2150'; ctx.fillRect(p0.x, p0.y, LANE * s, (HALF + GUTTER) * 2 * s);
@@ -235,11 +263,13 @@ export class BowlingGame implements MiniGame {
       const b = this.toScreen(this.ball.x, this.ball.y);
       ctx.strokeStyle = `rgba(255,${Math.round(255 - power * 180)},80,0.9)`; ctx.lineWidth = 3; ctx.setLineDash([8, 6]);
       ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x + Math.cos(ang) * 260 * s * power, b.y + Math.sin(ang) * 260 * s * power); ctx.stroke(); ctx.setLineDash([]);
-      drawPill(ctx, `Force ${Math.round(power * 100)} %`, b.x, b.y - 30 * ui, 12 * ui, 'rgba(14,11,16,0.85)', PAL.text);
+      forcePill = { x: b.x, y: b.y, text: `Force ${Math.round(power * 100)} %` };
     } else if (this.phase === 'aim') {
       const b = this.toScreen(this.ball.x, this.ball.y);
       ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R * s + 6 + Math.sin(performance.now() / 200) * 2, 0, Math.PI * 2); ctx.stroke();
     }
+    ctx.restore();
+    if (forcePill) { const q = this.real(forcePill.x, forcePill.y); drawPill(ctx, forcePill.text, q.x, q.y - 30 * ui - (this.rot ? 0 : 0), 12 * ui, 'rgba(14,11,16,0.85)', PAL.text); }
     const a = this.host.area;
     if (this.result) drawPill(ctx, this.result, a.x + a.w / 2, a.y + a.h - 80 * ui, 14 * ui, 'rgba(14,11,16,0.9)', PAL.gold);
     else if (this.message) drawPill(ctx, this.message, a.x + a.w / 2, a.y + a.h - 18 * ui, 13 * ui, 'rgba(14,11,16,0.85)', PAL.text);

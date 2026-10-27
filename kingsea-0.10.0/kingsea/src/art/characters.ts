@@ -10,11 +10,11 @@ export const FRAME_W = 32, FRAME_H = 48, FEET_Y = 46;
 export type HairStyle = 'court' | 'carre' | 'chignon' | 'long' | 'boucles' | 'queue' | 'rase';
 export type Outfit = 'marin' | 'polo' | 'hawai' | 'robe' | 'costume' | 'sport' | 'smoking' | 'blazer' | 'cuir' | 'soiree' | 'lin' | 'survet'
   | 'barman' | 'croupier' | 'accueil' | 'cuisine' | 'dj' | 'arcade' | 'officier';
-export type Hat = 'aucun' | 'capitaine' | 'paille' | 'bob' | 'casquette' | 'toque' | 'casque' | 'hautdeforme' | 'fedora' | 'beret' | 'panama' | 'bandana';
+export type Hat = 'aucun' | 'capitaine' | 'paille' | 'bob' | 'casquette' | 'toque' | 'casque' | 'hautdeforme' | 'fedora' | 'beret' | 'panama' | 'bandana' | 'amiral' | 'couronne';
 export type Pants = 'auto' | 'jean' | 'chino' | 'noir' | 'blanc';
 export type Shoes = 'auto' | 'baskets' | 'mocassins' | 'escarpins' | 'bottes' | 'sandales';
 export type GlassesStyle = 'soleil' | 'aviateur' | 'rondes';
-export type Jewel = 'aucun' | 'collier' | 'montre' | 'boucles' | 'chaine';
+export type Jewel = 'aucun' | 'collier' | 'montre' | 'boucles' | 'chaine' | 'medaille';
 
 export interface Look {
   skin: string; hair: string; hairStyle: HairStyle;
@@ -54,6 +54,7 @@ export const PLAYER_GLASSES: Array<{ id: GlassesStyle; label: string; unlock?: s
 export const PLAYER_JEWELS: Array<{ id: Jewel; label: string; unlock?: string }> = [
   { id: 'aucun', label: 'Aucun' }, { id: 'collier', label: 'Perles', unlock: 'jewel:collier' }, { id: 'montre', label: 'Montre', unlock: 'jewel:montre' },
   { id: 'boucles', label: 'Créoles', unlock: 'jewel:boucles' }, { id: 'chaine', label: 'Chaîne', unlock: 'jewel:chaine' },
+  { id: 'medaille', label: 'Médaille', unlock: 'jewel:medaille' },
 ];
 export const OUTFIT_COLORS = ['#173e72', '#0f8a8a', '#1fc7c1', '#e5b54a', '#c0392b', '#ff6f91', '#7b4dff', '#2e8b57', '#f4efe6', '#1b1b2f'];
 export const PLAYER_HATS: Array<{ id: Hat; label: string; unlock?: string }> = [
@@ -61,6 +62,7 @@ export const PLAYER_HATS: Array<{ id: Hat; label: string; unlock?: string }> = [
   { id: 'hautdeforme', label: 'Haut-de-forme', unlock: 'hat:hautdeforme' },
   { id: 'fedora', label: 'Fedora', unlock: 'hat:fedora' }, { id: 'beret', label: 'Béret', unlock: 'hat:beret' },
   { id: 'panama', label: 'Panama', unlock: 'hat:panama' }, { id: 'bandana', label: 'Bandana', unlock: 'hat:bandana' },
+  { id: 'amiral', label: 'Bicorne d’amiral', unlock: 'hat:amiral' }, { id: 'couronne', label: 'Couronne', unlock: 'hat:couronne' },
 ];
 
 /**
@@ -84,7 +86,7 @@ export const DEFAULT_LOOK: Look = { skin: '#f1c7a1', hair: '#3b2516', hairStyle:
 
 const HAIR_IDS = HAIR_STYLES.map((h) => h.id);
 const OUTFIT_IDS: Outfit[] = ['marin', 'polo', 'hawai', 'robe', 'costume', 'sport', 'smoking', 'blazer', 'cuir', 'soiree', 'lin', 'survet', 'barman', 'croupier', 'accueil', 'cuisine', 'dj', 'arcade', 'officier'];
-const HAT_IDS: Hat[] = ['aucun', 'capitaine', 'paille', 'bob', 'casquette', 'toque', 'casque', 'hautdeforme', 'fedora', 'beret', 'panama', 'bandana'];
+const HAT_IDS: Hat[] = ['aucun', 'capitaine', 'paille', 'bob', 'casquette', 'toque', 'casque', 'hautdeforme', 'fedora', 'beret', 'panama', 'bandana', 'amiral', 'couronne'];
 const isHex = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 
 /** Valide une apparence venue d'une sauvegarde (ou d'un autre joueur, plus tard) ; complète les champs invalides. */
@@ -128,7 +130,8 @@ export const NPC_LOOKS: Record<string, Look> = {
 };
 
 // ---------------------------------------------------------------- Animations
-export type Anim = 'walk' | 'idle' | 'interact' | 'sit' | 'dance' | 'wave' | 'clap' | 'cheer';
+export type Anim = 'walk' | 'idle' | 'interact' | 'sit' | 'dance' | 'wave' | 'clap' | 'cheer'
+  | 'bow' | 'salute' | 'laugh' | 'surprise' | 'thumbs' | 'facepalm' | 'shrug' | 'think' | 'spyglass' | 'stretch' | 'sigh' | 'love' | 'swell' | 'jump';
 /** Nombre d'images et directions disponibles par animation (les gestes sociaux sont de face). */
 export const ANIMS: Record<Anim, { frames: number; dirs: Dir[]; fps: number }> = {
   walk: { frames: 6, dirs: DIRS, fps: 10 },
@@ -139,7 +142,24 @@ export const ANIMS: Record<Anim, { frames: number; dirs: Dir[]; fps: number }> =
   wave: { frames: 2, dirs: ['down'], fps: 5 },
   clap: { frames: 2, dirs: ['down'], fps: 8 },
   cheer: { frames: 2, dirs: ['down'], fps: 4 },
+  // Émotes (mise à jour « Refonte ») : gestes de face, deux à quatre images
+  bow: { frames: 2, dirs: ['down'], fps: 1.6 },
+  salute: { frames: 2, dirs: ['down'], fps: 2 },
+  laugh: { frames: 4, dirs: ['down'], fps: 8 },
+  surprise: { frames: 2, dirs: ['down'], fps: 3 },
+  thumbs: { frames: 2, dirs: ['down'], fps: 3 },
+  facepalm: { frames: 2, dirs: ['down'], fps: 1.5 },
+  shrug: { frames: 2, dirs: ['down'], fps: 2.5 },
+  think: { frames: 2, dirs: ['down'], fps: 1.2 },
+  spyglass: { frames: 2, dirs: ['down'], fps: 1 },
+  stretch: { frames: 2, dirs: ['down'], fps: 1.2 },
+  sigh: { frames: 2, dirs: ['down'], fps: 1 },
+  love: { frames: 2, dirs: ['down'], fps: 2.5 },
+  swell: { frames: 4, dirs: ['down'], fps: 2.5 },
+  jump: { frames: 4, dirs: ['down'], fps: 6 },
 };
+/** Animations d'émote (dessinées de face, synchronisées avec les autres joueurs). */
+export const EMOTE_ANIMS = new Set<Anim>(['wave', 'clap', 'cheer', 'dance', 'bow', 'salute', 'laugh', 'surprise', 'thumbs', 'facepalm', 'shrug', 'think', 'spyglass', 'stretch', 'sigh', 'love', 'swell', 'jump']);
 
 interface Pose {
   dir: Dir;
@@ -174,6 +194,20 @@ export function poseFor(anim: Anim, dir: Dir, f: number): Pose {
     case 'wave': return { ...base, armB: f ? 2.85 : 2.4, mouth: 'open' };
     case 'clap': return { ...base, armA: f ? -0.95 : -0.55, armB: f ? -0.95 : -0.55, bob: f ? -0.5 : 0 };
     case 'cheer': return { ...base, armA: f ? 2.85 : 2.6, armB: f ? 2.85 : 2.6, bob: f ? -1.6 : -0.6, mouth: 'open' };
+    case 'bow': return { ...base, armA: -0.35, armB: -0.35, bob: f ? 2.6 : 1.6, blink: true, mouth: 'line' };
+    case 'salute': return { ...base, armA: 0.08, armB: f ? 2.45 : 2.3, mouth: 'smile', bob: -0.3 };
+    case 'laugh': return { ...base, armA: -0.7, armB: -0.7, bob: [0, -1, 0, -1][f], sway: [0, 0.5, 0, -0.5][f], mouth: 'open', blink: f % 2 === 1 };
+    case 'surprise': return { ...base, armA: f ? 2.1 : 1.8, armB: f ? 2.1 : 1.8, bob: f ? -1.2 : -0.8, mouth: 'open' };
+    case 'thumbs': return { ...base, armA: 0.15, armB: f ? 1.65 : 1.5, mouth: 'smile', bob: f ? -0.4 : 0 };
+    case 'facepalm': return { ...base, armA: 0.2, armB: 2.7, bob: f ? 0.6 : 0.3, blink: true, mouth: 'line' };
+    case 'shrug': return { ...base, armA: f ? 1.35 : 1.1, armB: f ? 1.35 : 1.1, bob: f ? -1 : -0.4, mouth: 'line' };
+    case 'think': return { ...base, armA: -0.45, armB: 2.05, mouth: 'line', blink: f === 1, sway: f ? 0.3 : 0 };
+    case 'spyglass': return { ...base, armA: 2.25, armB: 2.0, mouth: 'line', sway: f ? 0.4 : -0.4 };
+    case 'stretch': return { ...base, armA: f ? 3.05 : 2.85, armB: f ? 3.05 : 2.85, bob: f ? -1.4 : -0.6, blink: true, mouth: 'open' };
+    case 'sigh': return { ...base, armA: 0.02, armB: 0.02, bob: f ? 1.2 : 0.8, blink: true, mouth: 'line' };
+    case 'love': return { ...base, armA: -1.05, armB: -1.05, bob: f ? -0.6 : 0, mouth: 'smile' };
+    case 'swell': return { ...base, armA: 1.5, armB: 1.5, sway: [1.8, 0.6, -1.8, -0.6][f], bob: [0, -0.6, 0, -0.6][f], step: [0.4, 0, -0.4, 0][f] };
+    case 'jump': return { ...base, armA: 2.8, armB: 2.8, bob: [0, -3.5, -5, -2][f], step: f === 2 ? 0.5 : 0, mouth: 'open' };
   }
 }
 
@@ -398,7 +432,15 @@ function drawTorso(ctx: CanvasRenderingContext2D, l: Look, P: Palette, p: Pose):
 
 /** Collier de perles ou chaîne en or, au col (de face et de profil). */
 function drawJewelTorso(ctx: CanvasRenderingContext2D, l: Look, p: Pose, cx: number, ty: number): void {
-  if (p.dir === 'up' || (l.jewel !== 'collier' && l.jewel !== 'chaine')) return;
+  if (p.dir === 'up' || (l.jewel !== 'collier' && l.jewel !== 'chaine' && l.jewel !== 'medaille')) return;
+  if (l.jewel === 'medaille') {
+    // Médaille du navigateur : ruban marine, disque d'or (rose des vents)
+    const sx = cx + (p.dir === 'left' || p.dir === 'right' ? -1.5 : 0);
+    ctx.fillStyle = '#173e72'; ctx.beginPath(); ctx.moveTo(sx - 2, ty); ctx.lineTo(sx + 2, ty); ctx.lineTo(sx + 1, ty + 3.5); ctx.lineTo(sx - 1, ty + 3.5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#e5b54a'; ctx.beginPath(); ctx.arc(sx, ty + 5, 1.9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#9a7426'; ctx.fillRect(sx - 0.25, ty + 3.6, 0.5, 2.8); ctx.fillRect(sx - 1.4, ty + 4.75, 2.8, 0.5);
+    return;
+  }
   const side = p.dir === 'left' || p.dir === 'right';
   const ox = side ? -1.5 : 0;
   if (l.jewel === 'collier') {
@@ -581,6 +623,30 @@ function drawHat(ctx: CanvasRenderingContext2D, l: Look, p: Pose, hx: number, hy
       ctx.beginPath(); ctx.ellipse(hx, hy - 4.5, 9.6, 6, 0, Math.PI, Math.PI * 2); ctx.closePath(); fillOut(ctx, '#c0392b');
       ctx.fillStyle = '#ffffff'; for (const [dx, dy] of [[-5, -7], [0, -9], [5, -7], [-2, -5], [3, -5]] as const) { ctx.beginPath(); ctx.arc(hx + dx, hy + dy, 0.6, 0, Math.PI * 2); ctx.fill(); }
       if (side || back) { ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.moveTo(hx + (side ? 8 : 0), hy - 4); ctx.lineTo(hx + (side ? 12 : 3), hy); ctx.lineTo(hx + (side ? 10 : -3), hy + 1); ctx.closePath(); ctx.fill(); }
+      return;
+    }
+    case 'amiral': {
+      // Bicorne bleu nuit (porté en travers), galon doré, cocarde
+      ctx.beginPath();
+      if (side) { ctx.moveTo(hx - 7, hy - 5); ctx.quadraticCurveTo(hx, hy - 20, hx + 7, hy - 5); }
+      else { ctx.moveTo(hx - 13, hy - 6); ctx.quadraticCurveTo(hx - 6, hy - 16, hx, hy - 15); ctx.quadraticCurveTo(hx + 6, hy - 16, hx + 13, hy - 6); ctx.quadraticCurveTo(hx, hy - 9, hx - 13, hy - 6); }
+      ctx.closePath(); fillOut(ctx, '#0e2a4a');
+      ctx.strokeStyle = '#e5b54a'; ctx.lineWidth = 1.1; ctx.beginPath();
+      if (side) { ctx.moveTo(hx - 6.5, hy - 5.5); ctx.quadraticCurveTo(hx, hy - 19, hx + 6.5, hy - 5.5); }
+      else { ctx.moveTo(hx - 12.5, hy - 6.4); ctx.quadraticCurveTo(hx - 6, hy - 15.4, hx, hy - 14.4); ctx.quadraticCurveTo(hx + 6, hy - 15.4, hx + 12.5, hy - 6.4); }
+      ctx.stroke();
+      if (!back) { ctx.fillStyle = '#e5b54a'; ctx.beginPath(); ctx.arc(hx + (side ? -1 : 0), hy - 10.5, 2.2, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#b0193b'; ctx.beginPath(); ctx.arc(hx + (side ? -1 : 0), hy - 10.5, 1, 0, Math.PI * 2); ctx.fill(); }
+      return;
+    }
+    case 'couronne': {
+      // Couronne d'or à cinq pointes, perles et pierre turquoise
+      ctx.beginPath(); ctx.moveTo(hx - 8, hy - 5);
+      const pts = side ? 3 : 5;
+      for (let i = 0; i <= pts * 2; i++) { const x = hx - 8 + (16 * i) / (pts * 2); ctx.lineTo(x, i % 2 ? hy - 10 : hy - 15); }
+      ctx.lineTo(hx + 8, hy - 5); ctx.closePath(); fillOut(ctx, '#e5b54a');
+      ctx.fillStyle = '#9a7426'; ctx.fillRect(hx - 8, hy - 7, 16, 2);
+      ctx.fillStyle = '#f6f0e3'; for (let i = 0; i <= pts; i++) { ctx.beginPath(); ctx.arc(hx - 8 + (16 * i) / pts, hy - 15, 1, 0, Math.PI * 2); ctx.fill(); }
+      if (!back) { ctx.fillStyle = '#1fc7c1'; ctx.beginPath(); ctx.arc(hx, hy - 8.5, 1.4, 0, Math.PI * 2); ctx.fill(); }
       return;
     }
     case 'toque': {

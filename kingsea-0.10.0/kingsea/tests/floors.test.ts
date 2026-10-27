@@ -6,10 +6,10 @@ import { TileMap, propActive, propInteractPoint } from '../src/world/TileMap.ts'
 import { stairsArrival, TILE } from '../src/world/types.ts';
 import { FOOT_W, FOOT_H } from '../src/entities/Player.ts';
 
-test('le bateau compte exactement six niveaux, de -1 à 4, sans doublon', () => {
-  assert.equal(FLOORS.length, 6);
-  assert.deepEqual(FLOORS.map((f) => f.level).sort((a, b) => a - b), [-1, 0, 1, 2, 3, 4]);
-  assert.equal(new Set(FLOORS.map((f) => f.id)).size, 6);
+test('le bateau compte exactement sept niveaux, de -1 à 5 (pont Panorama), sans doublon', () => {
+  assert.equal(FLOORS.length, 7);
+  assert.deepEqual(FLOORS.map((f) => f.level).sort((a, b) => a - b), [-1, 0, 1, 2, 3, 4, 5]);
+  assert.equal(new Set(FLOORS.map((f) => f.id)).size, 7);
 });
 
 test('un id inconnu renvoie au hall', () => {

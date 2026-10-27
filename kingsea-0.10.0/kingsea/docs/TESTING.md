@@ -68,3 +68,13 @@ Sur chaque appareil, ouvrir **Paramètres → Diagnostic → Copier le rapport**
 
 ### Compte rendu
 Pour chaque problème : appareil, système, étape, ce qui était attendu, ce qui s'est passé, capture d'écran, rapport de diagnostic.
+
+### Version 0.13 — à vérifier à plusieurs, sur de vrais téléphones (non fait)
+- [ ] Deux à six joueurs à la même roulette : places affichées, sixième joueur envoyé sur une deuxième table, tirage identique pour tous.
+- [ ] Blackjack à trois : tour de parole, délai de 20 s, assurance, séparations jusqu'à 4 mains, coupure réseau d'un joueur en pleine main.
+- [ ] Crash à plusieurs : encaissements à des multiplicateurs différents, encaissement automatique.
+- [ ] Téléphone : messages entre deux appareils, pastille de non-lus, conversation effacée d'un seul côté.
+- [ ] Cadeaux : KSCoins (limite de 1 000 sur 24 h), jetons, objets (2 sur 24 h), clé ; affichage du délai de renouvellement.
+- [ ] Visites : sonnette, refus, acceptation, raccompagner, porte fermée, double de clé, changement de serrure.
+- [ ] Émotes : les 19 animations vues par un autre joueur ; le déplacement interrompt l'émote.
+- [ ] Pont Panorama (niveau 10) et écran de chargement en portrait / paysage.

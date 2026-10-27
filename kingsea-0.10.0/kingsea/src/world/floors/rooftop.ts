@@ -14,6 +14,7 @@ const grid = new GridBuilder(W, H, 'd')
   // Piste de danse de la boîte de nuit
   .fill(27, 14, 8, 7, 'f');
 const stairsDown = makeStairs(grid, 'left', 9, 'Logements');
+const stairsUp = makeStairs(grid, 'right', 5, 'Panorama');
 const map = grid.build();
 
 const transats: PropDef[] = [];
@@ -34,7 +35,7 @@ export const rooftopFloor: FloorDef = {
   props: [
     // Longue-vue : horizon le jour, étoiles filantes la nuit (secret)
     { kind: 'telescope', tx: 33, ty: 8, w: 1, h: 1, solid: true, interact: { id: 'telescope', label: 'Longue-vue', at: { x: 33.5, y: 9.6 }, radius: 1.3 } },
-    stairsDown,
+    stairsDown, stairsUp,
     { kind: 'elevator', tx: 16, ty: 0, w: 4, h: 2, interact: { id: 'elevator', label: 'Ascenseur', at: { x: 18, y: 2.5 }, radius: 1.7 } },
     { kind: 'lifebuoy', tx: 6, ty: 1, w: 1, h: 1 },
     { kind: 'lifebuoy', tx: 29, ty: 1, w: 1, h: 1 },

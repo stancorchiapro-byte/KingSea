@@ -18,6 +18,7 @@ export const ARCADE_INFO: Record<string, { better: 'high' | 'low'; medals: [numb
   football: { better: 'high', medals: [3, 5, 8], howto: ['Glisse vers le but : direction et puissance.', '10 tirs · le gardien lit de mieux en mieux tes frappes.'] },
   skeeball: { better: 'high', medals: [150, 250, 400], howto: ['Lance la boule vers les anneaux.', '9 boules · les petits anneaux rapportent le plus.'] },
   mole: { better: 'high', medals: [15, 30, 45], howto: ['Touche les crabes, évite les méduses.', '30 s · le rythme accélère.'] },
+  racing: { better: 'low', medals: [1000, 880, 800], howto: ['◀ ▶ pour tourner, GAZ et FREIN à droite.', '3 tours contre l’équipage · évite l’huile, vise les vagues turbo.'] },
   pinball: { better: 'high', medals: [15000, 50000, 120000], howto: ['Touche à gauche / à droite pour les batteurs.', '3 billes · cibles et bumpers.'] },
 };
 const MEDAL_NAMES = ['Bronze', 'Argent', 'Or'] as const;
@@ -63,6 +64,8 @@ export function finishArcade(s: Services, game: string, score: number, unit: str
 export class ArcadeCard {
   result: ArcadeResult | null = null;
   rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Zone de jeu complète : assombrie derrière la carte pour qu'aucun élément du jeu ne la traverse. */
+  private area = { x: 0, y: 0, w: 0, h: 0 };
   private count = 0;
   private onGo: (() => void) | null = null;
   private lastTick = -1;
@@ -87,6 +90,7 @@ export class ArcadeCard {
 
   /** Place la carte au centre de la zone et le bouton principal dans sa partie basse. */
   place(a: { x: number; y: number; w: number; h: number }, ui: number, btn: Button): void {
+    this.area = { ...a };
     const w = Math.min(a.w - 20 * ui, 460 * ui), h = Math.min(a.h - 16 * ui, 250 * ui);
     this.rect = { x: a.x + (a.w - w) / 2, y: a.y + (a.h - h) / 2, w, h };
     Object.assign(btn, { x: this.rect.x + (w - Math.min(220 * ui, w - 30 * ui)) / 2, y: this.rect.y + h - 64 * ui, w: Math.min(220 * ui, w - 30 * ui), h: 52 * ui });
@@ -96,8 +100,18 @@ export class ArcadeCard {
   render(ctx: CanvasRenderingContext2D, ui: number, over: boolean): void {
     const R = this.rect, info = ARCADE_INFO[this.game];
     ctx.save();
-    roundRect(ctx, R.x, R.y, R.w, R.h, 16 * ui); ctx.fillStyle = 'rgba(14,11,16,0.93)'; ctx.fill();
-    ctx.strokeStyle = 'rgba(212,175,90,0.7)'; ctx.lineWidth = 1.4; ctx.stroke();
+    const A = this.area;
+    if (A.w > 0) { ctx.fillStyle = 'rgba(2,8,18,0.55)'; ctx.fillRect(A.x, A.y, A.w, A.h); }
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 18 * ui; ctx.shadowOffsetY = 4 * ui;
+    const bg = ctx.createLinearGradient(0, R.y, 0, R.y + R.h);
+    bg.addColorStop(0, '#13253d'); bg.addColorStop(1, '#0a1424');
+    roundRect(ctx, R.x, R.y, R.w, R.h, 16 * ui); ctx.fillStyle = bg; ctx.fill();
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = 'rgba(212,175,90,0.75)'; ctx.lineWidth = 1.4; ctx.stroke();
+    // Filet doré en tête de carte
+    const hl = ctx.createLinearGradient(R.x, 0, R.x + R.w, 0);
+    hl.addColorStop(0, 'rgba(212,175,90,0)'); hl.addColorStop(0.5, 'rgba(239,220,174,0.9)'); hl.addColorStop(1, 'rgba(212,175,90,0)');
+    ctx.fillStyle = hl; ctx.fillRect(R.x + 20 * ui, R.y + 1, R.w - 40 * ui, 1.6);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const cx = R.x + R.w / 2, best = this.s.data.stats[`best.${this.game}`];
     if (!over || !this.result) {

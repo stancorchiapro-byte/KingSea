@@ -5,6 +5,9 @@ import type { PointerHandler } from '../engine/Input';
 import type { Viewport } from '../engine/Viewport';
 import type { Services } from '../systems/Services';
 import type { Toasts } from '../ui/Toasts';
+import type { ResultFx } from './ResultFx';
+import type { AuthReply } from '../authority/types';
+import type { TableClient } from '../net/Tables';
 
 export interface Area { x: number; y: number; w: number; h: number }
 
@@ -18,6 +21,19 @@ export interface MiniGameHost {
   refreshHandlers(): void;
   /** Ferme le jeu et revient au navire. */
   quit(): void;
+  /** Présentation commune des résultats (bannière, pluie de jetons) — purement visuelle. */
+  readonly result: ResultFx;
+  /** Affiche le résultat d'une manche et joue le son adapté (gain selon le palier, mise rendue, perte). */
+  celebrate(net: number, stake: number, sub?: string): void;
+  /** Table multijoueur du casino (en ligne) ; null hors ligne ou pour un jeu sans table. */
+  readonly table: TableClient | null;
+  /** Change de table (blackjack : niveau de table). */
+  switchTable(game: string, tier?: string | null): void;
+  /**
+   * Manche d'un jeu à tirage (roulette, baccarat, craps, keno, courses) : à une table en ligne, la mise rejoint la
+   * manche commune et la promesse se résout au tirage partagé ; sinon partie solo. Soldes appliqués dans les deux cas.
+   */
+  playRound(game: string, action: string, input: unknown, stake: number, onAccepted?: () => void): Promise<AuthReply>;
 }
 
 export interface MiniGame {
@@ -39,4 +55,9 @@ export interface MiniGame {
   dispose?(): void;
   /** Vrai pendant une animation de résultat : le compteur de KSCoins attend la révélation. */
   readonly holdBalance?: boolean;
+  /** Le jeu affiche lui-même son bilan (mise, retour, net) : pas de bandeau central de crédit par-dessus. */
+  readonly ownSettlement?: boolean;
+  /** Jeu de table multijoueur (en ligne) et niveau de table (blackjack). */
+  readonly tableGame?: string;
+  readonly tableTier?: string;
 }

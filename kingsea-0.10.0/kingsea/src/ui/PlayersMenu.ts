@@ -1,11 +1,13 @@
 // Liste des joueurs en ligne (étage de chacun) avec Bloquer / Débloquer et Signaler.
 import { PAL } from '../art/palette';
+import type { Look } from '../art/characters';
+import { drawAvatar } from './avatar';
 import type { Viewport } from '../engine/Viewport';
 import type { Services } from '../systems/Services';
 import { Modal } from './Modal';
 import { font, makeButton, type Button } from './UIKit';
 
-export interface PlayerRow { id: string; name: string; floor: string }
+export interface PlayerRow { id: string; name: string; floor: string; look?: Look }
 const FLOOR_NAMES: Record<string, string> = { hub: 'Hall', engine: 'Machines', casino: 'Casino', arcade: 'Arcade', cabins: 'Logements', rooftop: 'Rooftop', 'cabin-interior': 'Sa cabine' };
 export const REPORT_REASONS = ['Insultes', 'Spam', 'Harcèlement', 'Pseudo inapproprié'];
 
@@ -64,10 +66,13 @@ export class PlayersMenu extends Modal {
     }
     if (!this.rows.length) { ctx.fillStyle = PAL.textDim; ctx.font = font(15 * ui, 600); ctx.fillText('Personne d’autre n’est en ligne pour l’instant.', C.x, C.y + 20 * ui, C.w); return; }
     for (const r of this.rows) {
+      const ar = 17 * ui, tx = C.x + ar * 2 + 10 * ui, maxW = C.w - (this.act.addFriend ? 310 : 220) * ui - ar * 2 - 10 * ui;
+      drawAvatar(ctx, r.look, r.name, C.x + ar, r.y, ar, true);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillStyle = this.blocked.has(r.id) ? PAL.textDim : PAL.text; ctx.font = font(15 * ui, 800);
-      ctx.fillText(r.name, C.x, r.y - 7 * ui, C.w - (this.act.addFriend ? 310 : 220) * ui);
+      ctx.fillText(r.name, tx, r.y - 7 * ui, maxW);
       ctx.fillStyle = PAL.textDim; ctx.font = font(11.5 * ui, 600);
-      ctx.fillText(FLOOR_NAMES[r.floor] ?? r.floor, C.x, r.y + 10 * ui, C.w - (this.act.addFriend ? 310 : 220) * ui);
+      ctx.fillText(FLOOR_NAMES[r.floor] ?? r.floor, tx, r.y + 10 * ui, maxW);
     }
   }
 }

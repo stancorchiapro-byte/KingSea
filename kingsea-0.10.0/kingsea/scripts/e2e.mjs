@@ -127,7 +127,8 @@ try {
 
   // Réception : cadeau de bienvenue une seule fois
   await teleport(27, 6.2); await sleep(200);
-  await tap(...(await btnCenter('window.__ks.scene.hud.interactBtn'))); await sleep(400);
+  await tap(...(await btnCenter('window.__ks.scene.hud.interactBtn')));
+  for (let i = 0; i < 14 && !(await page.evaluate(() => !!window.__ks.scene.modal)); i++) await sleep(150);
   const gift = await btnCenter('window.__ks.scene.modal.layer.buttons[0]');
   const b1 = (await state()).balance;
   await markAsks();
@@ -261,6 +262,17 @@ try {
   };
   const goFloor = async (id) => { await tap(...(await btnCenter('window.__ks.scene.hud.floorsBtn'))); await sleep(350); await tap(...(await btnCenter(`window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'floor-${id}')`))); await sleep(2600); };
   const waitFor = async (expr, ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await game(expr)) return true; await sleep(150); } return false; };
+  // Blackjack : refuse l'assurance et « Reste » sur chaque main (1 à 5 cases, séparations comprises) jusqu'au règlement
+  const bjPlayOut = async () => {
+    for (let i = 0; i < 20; i++) {
+      await waitFor(`${G}.g.phase === 'settled' || ((${G}.g.phase === 'player' || ${G}.g.phase === 'insurance') && ${G}.t >= ${G}.queue && !${G}.waiting)`, 6000);
+      const ph = await game(`${G}.g.phase`);
+      if (ph === 'insurance') { await tap(...(await btnCenter(`${G}.btn.insNo`))); await sleep(500); continue; }
+      if (ph !== 'player') break;
+      await tap(...(await btnCenter(`${G}.btn.stand`))); await sleep(450);
+    }
+    return waitFor(`${G}.g.phase === 'settled' && !${G}.settlePending`, 8000);
+  };
 
   // Billard (arcade)
   await teleport(4.5, 8.2); await sleep(250); await tapInteract(); await sleep(1700);
@@ -288,6 +300,32 @@ try {
   await page.screenshot({ path: 'e2e-shots/21-bowling.png' });
   await quitGame();
 
+  // Circuit KS (arcade) : départ, accélérateur et direction au doigt (zones tactiles)
+  await teleport(28.5, 9.7); await sleep(250); await tapInteract(); await sleep(1700);
+  check('Circuit KS : le jeu s’ouvre', await game(`!!${G}.track && Array.isArray(${G}.cars)`));
+  await tap(...(await btnCenter(`${G}.startBtn`)));
+  const raceOn = await waitFor(`${G}.phase === 'race'`, 6000);
+  const zc = (id) => page.evaluate((i) => { const z = window.__ksGame.game.zones.find((q) => q.id === i); return [z.x + z.w / 2, z.y + z.h / 2]; }, id);
+  const gas = await zc('gas'), left = await zc('left');
+  const rp0 = await game(`${G}.cars[0].progress`);
+  await touch('touchStart', [gas]); await sleep(1500);
+  await touch('touchStart', [gas, left]); await sleep(300);
+  const bothHeld = await game(`${G}.isHeld('gas') && ${G}.isHeld('left')`);
+  const heading0 = await game(`${G}.cars[0].heading`);
+  await sleep(300);
+  const heading1 = await game(`${G}.cars[0].heading`);
+  await touch('touchMove', [gas]); await sleep(1200);
+  await touch('touchEnd', []);
+  const p1 = await game(`${G}.cars[0].progress`), aiP = await game(`Math.max(...${G}.cars.slice(1).map((c) => c.progress))`);
+  check('Circuit KS : course lancée, la voiture avance à l’accélérateur', raceOn && p1 - rp0 > 200, `progression ${Math.round(p1 - rp0)}`);
+  check('Circuit KS : deux doigts (gaz + gauche) reconnus, la voiture tourne', bothHeld && heading0 !== heading1, `${heading0} → ${heading1}`);
+  check('Circuit KS : les pilotes de l’équipage roulent aussi', aiP > 200, `${Math.round(aiP)}`);
+  check('Circuit KS : impossible de quitter en pleine course', (await game(`${G}.canQuit().ok`)) === false);
+  await page.screenshot({ path: 'e2e-shots/21b-circuit.png' });
+  // Sortie du scénario : le harnais remet le jeu à l'accueil (aucun score soumis, aucune récompense)
+  await page.evaluate(() => { const g = window.__ksGame.game; g.phase = 'ready'; g.held.clear(); });
+  await quitGame();
+
   // Casino : les mises sont en jetons (achetés à la caisse avec des KSCoins)
   await goFloor('casino');
   const exch = await page.evaluate(async () => { const r = await window.__ks.services.ask('purser', 'purser', 'exchange', { dir: 'buy', amount: 300 }); window.__e2eChips = true; return r.ok; });
@@ -301,6 +339,8 @@ try {
   check('Blackjack : choix de la table (Débutant 5–100)', (await game(`${G}.tableDef.id`)) === 'debutant');
   await tap(...(await btnCenter(`${G}.btn.deal`))); await sleep(400);
   await waitFor(`${G}.g.phase !== 'player' || ${G}.t >= ${G}.queue`, 6000);
+  // Croupier montrant un As : assurance proposée (refusée ici), puis la main continue
+  if (await game(`${G}.g.phase === 'insurance'`)) { await waitFor(`${G}.t >= ${G}.queue - 0.3`, 4000); await tap(...(await btnCenter(`${G}.btn.insNo`))); await sleep(500); await waitFor(`${G}.g.phase !== 'player' || ${G}.t >= ${G}.queue`, 6000); }
   if (await game(`${G}.g.phase === 'player'`)) { await tap(...(await btnCenter(`${G}.btn.stand`))); await sleep(400); }
   await waitFor(`${G}.g.phase === 'settled' && !${G}.settlePending`, 8000);
   const bjRecap = await game(`${G}.recap`);
@@ -309,6 +349,29 @@ try {
   const bj1 = (await state()).balance;
   check('Blackjack : manche jouée, KSCoins exactes', bjPhase === 'settled' && bj1 === bj0 - bjStake + bjPay + (await sinceMark()).bonus, `${bj0} → ${bj1} (mise ${bjStake}, gain ${bjPay})`);
   await page.screenshot({ path: 'e2e-shots/22-blackjack.png' });
+  // Blackjack à 3 mains : sélecteur « 3 », mises indépendantes, chaque main jouée, comptes exacts, bilan par main
+  await waitFor(`${G}.betting`, 6000);
+  await tap(...(await btnCenter(`${G}.countBtns[2]`))); await sleep(300);
+  await tap(...(await btnCenter(`${G}.boxBtns[1]`))); await sleep(200);
+  await tap(...(await btnCenter(`${G}.betCtl.plus`))); await sleep(200);
+  const mhBets = await game(`[...${G}.boxBets]`);
+  check('Blackjack 3 mains : trois cases, mise de la main 2 réglée seule', mhBets.length === 3 && mhBets[1] > mhBets[0] && mhBets[0] === mhBets[2], JSON.stringify(mhBets));
+  const mh0 = (await state()).balance;
+  await markAsks();
+  await tap(...(await btnCenter(`${G}.btn.deal`))); await sleep(400);
+  await bjPlayOut();
+  const mhStake = await game(`${G}.g.totalStake`), mhPay = await game(`${G}.g.totalPayout`), mhRecap = await game(`${G}.recap`);
+  const mh1 = (await state()).balance;
+  check('Blackjack 3 mains : mise totale = somme des 3 mises, solde exact', mhStake >= mhBets.reduce((a, b) => a + b, 0) && mh1 === mh0 - mhStake + mhPay + (await sinceMark()).bonus, `${mh0} → ${mh1} (mise ${mhStake}, retour ${mhPay})`);
+  check('Blackjack 3 mains : bilan par main (mise, résultat, net) et net global = retour − mise', !!mhRecap && mhRecap.hands.length >= 3 && mhRecap.hands.every((h) => h.net === h.payout - h.stake) && mhRecap.payout - mhRecap.stake === mhPay - mhStake, JSON.stringify(mhRecap?.hands));
+  await page.screenshot({ path: 'e2e-shots/22b-blackjack-3mains.png' });
+  // Menu « Jeux » : passage direct du blackjack à la roulette, sans repasser par le navire
+  await waitFor(`${G}.canQuit().ok`, 6000);
+  await tap(...(await btnCenter('window.__ksGame.lobbyBtn'))); await sleep(400);
+  const lobbyIds = await game("window.__ksGame.modal?.layer.buttons.map((b) => b.id) ?? []");
+  check('Menu Jeux : tous les jeux du casino listés, le jeu en cours désactivé', lobbyIds.includes('lobby-roulette') && lobbyIds.includes('lobby-crash') && (await game("window.__ksGame.modal.layer.buttons.find((b) => b.id === 'lobby-blackjack').enabled")) === false, lobbyIds.join(','));
+  await tap(...(await btnCenter("window.__ksGame.modal.layer.buttons.find((b) => b.id === 'lobby-roulette')"))); await sleep(3200);
+  check('Menu Jeux : la roulette s’ouvre directement', (await game(`${G}.id`)) === 'roulette', await game(`${G}.id`));
   await quitGame();
   // Roulette
   await teleport(4.5, 8.2); await sleep(250); await tapInteract(); await sleep(1700);
@@ -360,12 +423,12 @@ try {
   let ok = await openAt(10.5, 16.3, 'blackjack-hilo');
   let b0 = (await state()).balance;
   await pickTable();
+  // Le nombre de mains choisi au blackjack est conservé : une seule main ici
+  await tap(...(await btnCenter(`${G}.countBtns[0]`))); await sleep(250);
   await tap(...(await btnCenter(`${G}.btn.deal`))); await sleep(400);
-  await waitFor(`${G}.g.phase !== 'player' || ${G}.t >= ${G}.queue`, 6000);
-  if (await game(`${G}.g.phase === 'player'`)) { await tap(...(await btnCenter(`${G}.btn.stand`))); await sleep(400); }
-  await waitFor(`${G}.g.phase === 'settled' && !${G}.settlePending`, 8000);
+  const hiloSettled = await bjPlayOut();
   const rc = await game(`${G}.running`), bjs = await game(`${G}.g.totalStake`), bjp = await game(`${G}.g.totalPayout`);
-  check('Blackjack Hi-Lo : manche + compte courant affiché', ok && (await state()).balance === b0 - bjs + bjp + (await sinceMark()).bonus && Number.isInteger(rc) && rc !== null, `compte ${rc}`);
+  check('Blackjack Hi-Lo : manche réglée + compte courant affiché', ok && hiloSettled && (await state()).balance === b0 - bjs + bjp + (await sinceMark()).bonus && Number.isInteger(rc) && rc !== null, `compte ${rc}`);
   await page.screenshot({ path: 'e2e-shots/30-hilo.png' });
   await quitGame();
 
@@ -650,7 +713,8 @@ try {
   check('Toboggan : glissade jusque dans la piscine', swim === true);
   await teleport(30.5, 17.5); await sleep(300);
   await tap(...(await btnCenter('window.__ks.scene.hud.emoteBtn'))); await sleep(300);
-  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'dance')"))); await sleep(800);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ecat-detente')"))); await sleep(250);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'emote-dance')"))); await sleep(800);
   const dancing = await page.evaluate(() => window.__ks.scene.emote && window.__ks.scene.emote.id === 'dance' && window.__ks.scene.emote.t === Infinity);
   check('Danser sur la piste (danse continue, en rythme)', dancing === true);
   await page.screenshot({ path: 'e2e-shots/29-danse.png' });
@@ -676,7 +740,8 @@ try {
   const p0 = await page.evaluate(() => { const p = window.__ks.scene.crowd.list[0]; return [p.x / 32, p.y / 32]; });
   await teleport(p0[0] + 1.2, p0[1]); await sleep(200);
   await tap(...(await btnCenter('window.__ks.scene.hud.emoteBtn'))); await sleep(300);
-  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'wave')"))); await sleep(400);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ecat-social')"))); await sleep(250);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'emote-wave')"))); await sleep(400);
   const waving = await page.evaluate(() => window.__ks.scene.crowd.list.filter((p) => p.state === 'wave').length);
   const pAnim = await page.evaluate(() => window.__ks.scene.playerAnim().anim);
   await page.screenshot({ path: 'e2e-shots/46-salut-passagers.png' });

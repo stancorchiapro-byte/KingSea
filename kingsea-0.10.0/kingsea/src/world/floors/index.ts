@@ -1,4 +1,4 @@
-// Registre des six niveaux du bateau, du plus haut au plus bas (ordre d'affichage de l'ascenseur).
+// Registre des sept niveaux du bateau, du plus haut au plus bas (ordre d'affichage de l'ascenseur).
 import type { RoomState } from '../../authority/progress';
 import type { FloorDef } from '../types';
 import { arcadeFloor } from './arcade';
@@ -8,8 +8,9 @@ import { casinoFloor } from './casino';
 import { engineFloor } from './engineRoom';
 import { hubFloor } from './hub';
 import { rooftopFloor } from './rooftop';
+import { panoramaFloor } from './panorama';
 
-export const FLOORS: FloorDef[] = [rooftopFloor, cabinsFloor, arcadeFloor, casinoFloor, hubFloor, engineFloor];
+export const FLOORS: FloorDef[] = [panoramaFloor, rooftopFloor, cabinsFloor, arcadeFloor, casinoFloor, hubFloor, engineFloor];
 
 export const HUB_ID = 'hub';
 export { INTERIOR_IDS } from './cabinInterior';

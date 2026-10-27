@@ -11,14 +11,26 @@ import { Toasts } from '../ui/Toasts';
 import { ButtonLayer, font, Icons, makeButton, type Button } from '../ui/UIKit';
 import { BalanceDisplay, LevelDisplay, LevelUpOverlay } from '../ui/Wealth';
 import type { ProgressSnapshot } from '../authority/types';
+import { ResultFx } from '../games/ResultFx';
+import { makeCanvas } from '../art/canvas';
+import type { AuthReply } from '../authority/types';
+import { ROUND_GAMES } from '../authority/tables';
+import { TableClient } from '../net/Tables';
+import { TABLE_BAR_H, TableBar, TablesMenu } from '../ui/TableBar';
+import { CasinoLobbyMenu } from '../ui/CasinoLobbyMenu';
 
 export class MiniGameScene implements Scene, MiniGameHost {
   readonly idleThrottle = false;
   readonly toasts = new Toasts();
+  readonly result = new ResultFx();
+  /** Fond du jeu pré-rendu (dégradé, vignette, motif de tenture) : redessiné seulement si la taille change. */
+  private bgCache: { key: string; c: ReturnType<typeof makeCanvas> } | null = null;
   area: Area = { x: 0, y: 0, w: 0, h: 0 };
   private header = new ButtonLayer(8);
   private quitBtn: Button;
   private rulesBtn: Button;
+  /** Casino : passer directement à un autre jeu (« Jeux »). */
+  private lobbyBtn: Button;
   private modal: Modal | null = null;
   private balance: BalanceDisplay;
   private level = new LevelDisplay();
@@ -27,6 +39,8 @@ export class MiniGameScene implements Scene, MiniGameHost {
   private intro = 0.45;
   private failed: string | null = null;
   private t = 0;
+  table: TableClient | null = null;
+  private tableBar: TableBar | null = null;
   private onProgress = (p: ProgressSnapshot) => {
     if (this.s.game.current !== this) return;
     this.level.gain(p.gainedXp);
@@ -47,8 +61,10 @@ export class MiniGameScene implements Scene, MiniGameHost {
     this.header.onTapSound = () => s.audio.tap();
     this.quitBtn = makeButton({ id: 'mg-quit', label: 'Quitter', icon: Icons.close, style: 'secondary', fontSize: 14, onTap: () => this.quit() });
     this.rulesBtn = makeButton({ id: 'mg-rules', label: 'Règles', style: 'ghost', fontSize: 14, onTap: () => this.openRules() });
-    this.header.buttons = [this.rulesBtn, this.quitBtn];
+    this.lobbyBtn = makeButton({ id: 'mg-lobby', label: 'Jeux', style: 'ghost', fontSize: 14, visible: game.currency === 'chips', onTap: () => this.openLobby() });
+    this.header.buttons = [this.lobbyBtn, this.rulesBtn, this.quitBtn];
     this.balance = new BalanceDisplay(game.currency === 'chips' ? 'chips' : 'coins');
+    this.result.unit = game.currency === 'chips' ? 'jetons' : 'KSCoins';
   }
 
   /** Portefeuille du jeu : jetons au casino, KSCoins ailleurs. */
@@ -58,10 +74,15 @@ export class MiniGameScene implements Scene, MiniGameHost {
 
   enter(): void {
     this.balance.sync(this.purse.balance);
-    this.balance.onDelta = (d) => { if (d > 0) this.s.audio.coin(); };
+    // Gains : pièces ou jetons partent du centre du jeu vers le compteur (montant réel crédité par l'autorité)
+    this.balance.onArrive = (i, n) => {
+      if (i === n) { if (this.game.currency === 'chips') this.s.audio.chip(); else this.s.audio.coin(); }
+      else if (i % 3 === 1) this.s.audio.tick();
+    };
     this.levelUp.onShow = () => { this.s.audio.jackpot(); this.s.haptic([40, 60, 40, 60, 120]); };
     this.s.progressListeners.add(this.onProgress);
     this.s.replyListeners.add(this.onReply);
+    if (this.game.tableGame) this.switchTable(this.game.tableGame, this.game.tableTier ?? null, false);
     this.layoutAll();
     try {
       this.game.init(this);
@@ -71,13 +92,41 @@ export class MiniGameScene implements Scene, MiniGameHost {
       console.error('[KingSea] mini-jeu', e);
       this.failed = `${this.game.title} n’a pas pu s’ouvrir. Réessaie dans un instant.`;
       this.rulesBtn.visible = false;
+      this.lobbyBtn.visible = false;
       this.quitBtn.label = 'Retour';
       this.intro = 0;
     }
     if (typeof location !== 'undefined' && location.search.includes('debug')) (window as unknown as { __ksGame: unknown }).__ksGame = this;
   }
 
-  exit(): void { this.s.progressListeners.delete(this.onProgress); this.s.replyListeners.delete(this.onReply); try { this.game.dispose?.(); } catch (e) { console.error(e); } this.s.save.saveNow(); }
+  /** Rejoint une table multijoueur (en ligne seulement : hors ligne, le jeu reste en solo, sans table simulée). */
+  switchTable(game: string, tier: string | null = null, relayout = true): void {
+    const net = this.s.net;
+    if (!net || !net.online) return;
+    if (this.table && this.table.game === game && this.table.tier === tier) return;
+    this.table?.dispose();
+    this.table = new TableClient(net, game, tier);
+    // Gain réglé automatiquement par le serveur (Crash : encaissement auto, fin de main) : soldes réalignés
+    this.table.onAutoReply = (r) => { this.s.absorb('casino', game, 'table', r); };
+    this.tableBar = new TableBar(this.s, this.table, () => this.openModal(new TablesMenu(this.s, this.table!)));
+    if (relayout) { this.layoutAll(); this.game.layout(); this.refreshHandlers(); }
+  }
+
+  async playRound(game: string, action: string, input: unknown, stake: number, onAccepted?: () => void): Promise<AuthReply> {
+    const t = this.table;
+    if (!t || !t.state || !(ROUND_GAMES as string[]).includes(game)) return this.s.ask('casino', game, action, input);
+    const r = await t.round(input, stake, (acc) => { this.s.absorb('casino', game, 'bet', { ...acc, stake: 0, done: false } as AuthReply); onAccepted?.(); });
+    return this.s.absorb('casino', game, action, r);
+  }
+
+  private openModal(m: Modal): void {
+    m.onClosed = () => { this.modal = null; this.refreshHandlers(); };
+    m.layout(this.vp);
+    this.modal = m;
+    this.refreshHandlers();
+  }
+
+  exit(): void { this.table?.dispose(); this.table = null; this.s.progressListeners.delete(this.onProgress); this.s.replyListeners.delete(this.onReply); try { this.game.dispose?.(); } catch (e) { console.error(e); } this.s.save.saveNow(); }
 
   onResize(): void { this.layoutAll(); if (!this.failed) this.game.layout(); this.modal?.layout(this.vp); }
 
@@ -86,15 +135,25 @@ export class MiniGameScene implements Scene, MiniGameHost {
     const top = v.safe.top + 8 * ui, hh = 46 * ui;
     const right = v.width - v.safe.right - 10 * ui;
     Object.assign(this.quitBtn, { x: right - 120 * ui, y: top, w: 120 * ui, h: hh });
-    Object.assign(this.rulesBtn, { x: right - 120 * ui - 10 * ui - 92 * ui, y: top, w: 92 * ui, h: hh });
-    const y = top + hh + 8 * ui;
+    // Écran étroit : boutons compacts (« ? » pour les règles) pour laisser la place au solde
+    const narrow = v.width < 560 * ui;
+    const rw = narrow ? Math.max(44, 50 * ui) : 92 * ui, lw = narrow ? Math.max(56, 62 * ui) : 80 * ui;
+    this.rulesBtn.label = narrow ? '?' : 'Règles';
+    Object.assign(this.rulesBtn, { x: right - 120 * ui - 10 * ui - rw, y: top, w: rw, h: hh });
+    Object.assign(this.lobbyBtn, { x: this.rulesBtn.x - 8 * ui - lw, y: top, w: lw, h: hh });
+    let y = top + hh + 8 * ui;
+    if (this.tableBar) {
+      const x0 = v.safe.left + 10 * ui;
+      this.tableBar.layout(x0, y, v.width - v.safe.left - v.safe.right - 20 * ui, ui);
+      y += TABLE_BAR_H * ui + 8 * ui;
+    }
     this.area = { x: v.safe.left + 10 * ui, y, w: v.width - v.safe.left - v.safe.right - 20 * ui, h: v.height - y - v.safe.bottom - 8 * ui };
   }
 
   pointerHandlers(): PointerHandler[] {
     if (this.modal) return [this.modal.layer];
     if (this.failed) return [this.header];
-    return [...this.game.handlers(), this.header];
+    return [...this.game.handlers(), ...(this.tableBar ? [this.tableBar.layer] : []), this.header];
   }
 
   refreshHandlers(): void { this.s.game.refreshHandlers(); }
@@ -123,6 +182,13 @@ export class MiniGameScene implements Scene, MiniGameHost {
     this.s.game.goto(this.back, 3.2, 'iris');
   }
 
+  /** Autre jeu du casino : seulement entre deux parties (même règle que pour quitter), même retour au navire. */
+  private openLobby(): void {
+    const c = this.failed ? { ok: true as const } : this.game.canQuit();
+    if (!c.ok) { this.toasts.show(c.reason, 'error'); this.s.audio.error(); return; }
+    this.openModal(new CasinoLobbyMenu(this.s, this.game.id, (e) => this.s.game.goto(() => new MiniGameScene(this.s, e.make(), this.back), 2.6, 'iris')));
+  }
+
   private openRules(): void {
     const chipsNote = this.game.currency === 'chips' ? '\n\nJetons de casino : on mise et on gagne des jetons, distincts des KSCoins. La caisse du casino les échange (1 jeton = 1 KSCoin, dans les deux sens).' : '';
     const m = new InfoDialog(this.s, `Règles · ${this.game.title}`, this.game.rules + chipsNote);
@@ -138,9 +204,14 @@ export class MiniGameScene implements Scene, MiniGameHost {
     this.toasts.update(dt);
     this.modal?.update(dt);
     this.balance.hold = !!this.game.holdBalance;
+    this.balance.home = this.game.ownSettlement ? null : { x: this.area.x + this.area.w / 2, y: this.area.y + this.area.h * 0.45 };
+    this.balance.lowFx = this.s.lowFx;
     this.balance.update(dt, this.purse.balance);
     this.level.update(dt, this.s.progress.xp);
     this.levelUp.update(dt, this.vp.width, this.vp.height);
+    this.result.lowFx = this.s.lowFx;
+    this.result.update(dt, this.area);
+    this.table?.update(dt);
     if (this.failed) return;
     // Clavier / manette : « Interagir » déclenche le bouton principal (doré) du jeu, s'il est disponible
     if (!this.modal && this.intro <= 0 && this.s.game.controls.pressed('interact')) {
@@ -153,16 +224,42 @@ export class MiniGameScene implements Scene, MiniGameHost {
     try { this.game.update(dt); } catch (e) { console.error('[KingSea] mini-jeu', e); this.failed = 'Une erreur est survenue dans ce jeu. Ta mise éventuelle est conservée par le croupier : reviens au navire.'; this.quitBtn.label = 'Retour'; }
   }
 
+  celebrate(net: number, stake: number, sub = ''): void {
+    const a = this.s.audio, tier = this.result.show(net, stake, sub);
+    if (net > 0) { if (tier >= 2) a.jackpot(); else a.win(); if (tier >= 1) a.coinShower(tier); }
+    else if (net === 0) a.push(); else a.lose();
+  }
+
+  /** Fond : dégradé du jeu, motif de tenture discret (losanges dorés), lumière d'ambiance et vignette. */
+  private background(w: number, h: number, dpr: number) {
+    const key = `${w}x${h}@${dpr}|${this.game.bg.join()}`;
+    if (this.bgCache?.key === key) return this.bgCache.c;
+    const k = Math.min(dpr, 2), c = makeCanvas(Math.ceil(w * k), Math.ceil(h * k)), g = c.ctx;
+    g.scale(k, k);
+    const lg = g.createLinearGradient(0, 0, 0, h);
+    lg.addColorStop(0, this.game.bg[0]); lg.addColorStop(1, this.game.bg[1]);
+    g.fillStyle = lg; g.fillRect(0, 0, w, h);
+    // Tenture : treillis de losanges très discret
+    g.strokeStyle = 'rgba(239,220,174,0.035)'; g.lineWidth = 1;
+    const step = 34;
+    g.beginPath();
+    for (let x = -h; x < w + h; x += step) { g.moveTo(x, 0); g.lineTo(x + h, h); g.moveTo(x + h, 0); g.lineTo(x, h); }
+    g.stroke();
+    // Lumière d'ambiance venant du haut (plafonnier) et vignette chaude de salon privé
+    const top = g.createRadialGradient(w / 2, -h * 0.1, 10, w / 2, -h * 0.1, Math.max(w, h) * 0.8);
+    top.addColorStop(0, 'rgba(255,226,170,0.10)'); top.addColorStop(1, 'rgba(255,226,170,0)');
+    g.fillStyle = top; g.fillRect(0, 0, w, h);
+    const vg = g.createRadialGradient(w / 2, h * 0.45, Math.min(w, h) * 0.3, w / 2, h * 0.5, Math.max(w, h) * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.45)');
+    g.fillStyle = vg; g.fillRect(0, 0, w, h);
+    this.bgCache = { key, c };
+    return c;
+  }
+
   render(ctx: CanvasRenderingContext2D): void {
     const v = this.vp, ui = v.ui;
-    const g = ctx.createLinearGradient(0, 0, 0, v.height);
-    g.addColorStop(0, this.game.bg[0]); g.addColorStop(1, this.game.bg[1]);
-    ctx.fillStyle = g; ctx.fillRect(0, 0, v.width, v.height);
-    // Vignette chaude (éclairage d'ambiance de salon privé)
-    const vg = ctx.createRadialGradient(v.width / 2, v.height * 0.45, Math.min(v.width, v.height) * 0.3, v.width / 2, v.height * 0.5, Math.max(v.width, v.height) * 0.75);
-    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.45)');
-    ctx.fillStyle = vg; ctx.fillRect(0, 0, v.width, v.height);
-    if (this.failed) this.renderFailure(ctx); else this.game.render(ctx);
+    ctx.drawImage(this.background(v.width, v.height, v.dpr).canvas as CanvasImageSource, 0, 0, v.width, v.height);
+    if (this.failed) this.renderFailure(ctx); else { this.game.render(ctx); this.tableBar?.render(ctx, ui); this.result.render(ctx, this.area, ui); }
 
     // En-tête : emblème, titre, niveau, solde
     const top = v.safe.top + 8 * ui, hh = 46 * ui;
@@ -171,11 +268,13 @@ export class MiniGameScene implements Scene, MiniGameHost {
     hg.addColorStop(0, 'rgba(8,6,10,0.85)'); hg.addColorStop(1, 'rgba(8,6,10,0)');
     ctx.fillStyle = hg; ctx.fillRect(0, 0, v.width, top + hh + 6 * ui);
     const ex = v.safe.left + 14 * ui + 14 * ui;
-    drawKSEmblem(ctx, ex, top + hh / 2, 28 * ui, 0, 'small');
     const pillH = hh - 8 * ui;
     ctx.font = font(pillH * 0.45, 800);
     const pw = ctx.measureText(this.balance.shown.toLocaleString('fr-FR')).width + pillH * 1.45;
-    const px = this.rulesBtn.visible ? this.rulesBtn.x - pw - 12 * ui : this.quitBtn.x - pw - 12 * ui;
+    const leftBtn = this.lobbyBtn.visible ? this.lobbyBtn : this.rulesBtn.visible ? this.rulesBtn : this.quitBtn;
+    const px = leftBtn.x - pw - 12 * ui;
+    // Emblème seulement s'il reste la place (écran étroit et gros solde : le solde passe avant)
+    if (px > ex + 16 * ui) drawKSEmblem(ctx, ex, top + hh / 2, 28 * ui, 0, 'small');
     const showLevel = v.width > 600;
     const levelW = 118 * ui, lx = px - levelW - 12 * ui;
     const titleMax = (showLevel ? lx : px) - (ex + 22 * ui) - 10 * ui;

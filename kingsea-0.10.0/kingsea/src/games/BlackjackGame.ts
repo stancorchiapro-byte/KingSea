@@ -11,10 +11,10 @@ import type { PointerHandler } from '../engine/Input';
 import { promptNumber } from '../ui/TextPrompt';
 import { ButtonLayer, font, makeButton, type Button } from '../ui/UIKit';
 import { BetControl, ChipFlights, Dealer, drawTable, feltText, presetChips, type Rect } from './casinoKit';
-import { BJ_TABLES, Blackjack, NATURAL_BONUS, type BjTable, type Hand, type Phase } from './logic/blackjack';
+import { BJ_RULES, BJ_TABLES, Blackjack, insuranceCost, rulesText, type BjTable, type Hand, type Insurance, type Phase } from './logic/blackjack';
 import { handValue, type Card } from './logic/cards';
 import type { MiniGame, MiniGameHost } from './MiniGame';
-import { drawCard, drawLabel, drawPill } from './widgets';
+import { drawCard, drawLabel, drawNote, drawPill } from './widgets';
 
 const HILO_RULES =
   '\n\nComptage Hi-Lo (aide affichée à l’écran) :\n• Cartes 2 à 6 : +1 · 7 à 9 : 0 · 10, figures et As : −1.\n' +
@@ -23,14 +23,15 @@ const HILO_RULES =
   '• Plus il est élevé, plus il reste de 10 et d’As : situation favorable au joueur. Le sabot est remélangé au quart restant.';
 
 const BASE_RULES =
-    'But : approcher 21 sans le dépasser et battre le croupier.\n' +
-    '• Figures = 10, As = 1 ou 11.\n' +
-    `• Blackjack naturel (As + 10 ou figure, en deux cartes) : payé 3 pour 2, PLUS un bonus de ${NATURAL_BONUS * 100} % de la mise initiale. ` +
-    'Un 21 en trois cartes ou plus, ou après une séparation, n’est pas un blackjack (payé 1 pour 1).\n' +
-    '• Le croupier vérifie son blackjack s’il montre un As ou un 10. Il tire jusqu’à 17 et reste sur 17.\n' +
-    '• Doubler (sur deux cartes) : mise doublée, une seule carte, que tu choisis de recevoir face visible ou face cachée (retournée à la fin de la manche).\n' +
-    '• Séparer : deux cartes de même rang deviennent deux mains (une fois ; As séparés : une carte chacun).\n' +
+    'Blackjack classique — but : approcher 21 sans le dépasser et battre le croupier.\n' +
+    '• Figures = 10, As = 1 ou 11 (la valeur la plus favorable est comptée automatiquement).\n' +
+    '• De 1 à 5 mains par manche (boutons 1 à 5), chacune avec sa propre mise entre le minimum et le maximum de la table ; le total de toutes les mises doit être disponible avant la distribution. Chaque main est jouée à son tour, de gauche à droite, puis réglée séparément.\n' +
+    '• Assurance : proposée main par main quand le croupier montre un As (moitié de la mise de cette main).\n' +
+    rulesText(BJ_RULES).map((l) => `• ${l}`).join('\n') + '\n' +
+    '• Un 21 en trois cartes ou plus, ou après une séparation, n’est pas un blackjack (payé 1 pour 1). Main au-dessus de 21 : perdue.\n' +
+    '• Doubler : mise doublée, une seule carte, reçue face visible ou face cachée (retournée à la fin de la manche).\n' +
     '• Égalité : mise rendue. Gain normal : 1 pour 1.\n' +
+    '• En ligne : 5 places par table ; tu peux jouer plusieurs mains sur les places libres (une place reste gardée pour chaque joueur assis) ; chacun joue ses mains à son tour (20 s par décision, puis « Rester » automatique).\n' +
     '• Tables : ' + BJ_TABLES.map((t) => `${t.name} ${t.min}–${t.max}${t.level > 1 ? ` (niveau ${t.level})` : ''}`).join(' · ') + ' (mise initiale).\n' +
     '• Pourboire : tu peux offrir des jetons au croupier (bouton « Pourboire ») ; ils ne sont pas rendus.\n' +
     'Sabot de 6 jeux. Les mises sont en jetons de casino (échangés contre des KSCoins à la caisse), monnaie du jeu sans valeur réelle.';
@@ -46,7 +47,14 @@ const TIPS = [1, 5, 10, 25, 50];
 let lastTable = 'standard';
 
 interface CardTime { at: number; flipAt: number; key: string; sounded: boolean }
-interface Recap { before: number; initial: number; extra: number; payout: number; bonus: number; stake: number; hands: Array<{ outcome: string; net: number }>; natural: boolean; dealerPeek: boolean }
+/** Ligne du récapitulatif : une main (ou une assurance), sa mise totale, son résultat, son gain ou sa perte nette. */
+interface RecapLine { label: string; stake: number; outcome: string; payout: number; net: number }
+interface Recap { before: number; initial: number; extra: number; payout: number; bonus: number; stake: number; hands: RecapLine[]; natural: boolean; dealerPeek: boolean }
+
+/** Nombre maximal de mains principales par manche (chacune avec sa mise). */
+const MAX_BOXES = 5;
+/** Dernières mises par main (mémorisées le temps de la session). */
+let lastBoxBets: number[] | null = null;
 
 export class BlackjackGame implements MiniGame {
   readonly id: string;
@@ -58,7 +66,25 @@ export class BlackjackGame implements MiniGame {
   private running = 0;
   private remaining = 312;
   /** Actions permises par l'autorité */
-  private can = { hit: false, stand: false, double: false, split: false };
+  private can = { hit: false, stand: false, double: false, split: false, insurance: false };
+  /** Aide au comptage Hi-Lo affichée (outil facultatif, sans effet sur les règles). */
+  private showHilo: boolean;
+  private insurance: Record<number, Insurance> = {};
+  /** Table partagée (en ligne) : mes mains principales dans la manche (index de place), noms des places, mise posée. */
+  private myBoxes: number[] = [];
+  /** Mains principales préparées avant la distribution : une mise par main (1 à 5), main en cours de réglage. */
+  private boxBets: number[] = [];
+  private selBox = 0;
+  private boxBtns: Button[] = [];
+  private countBtns: Button[] = [];
+  /** Places libres à la table partagée pour moi (une place reste gardée pour chaque autre joueur assis). */
+  private freeBoxes = MAX_BOXES;
+  private insureBox = -1;
+  private seatNames: string[] = [];
+  private tablePending = 0;
+  private tableRound = -1;
+  get tableGame(): string { return this.id; }
+  get tableTier(): string { return lastTable; }
   private waiting = false;
   private dealer: Dealer;
 
@@ -66,7 +92,8 @@ export class BlackjackGame implements MiniGame {
     this.id = hilo ? 'blackjack-hilo' : 'blackjack';
     this.title = hilo ? 'Blackjack Hi-Lo' : 'Blackjack';
     this.bg = hilo ? ['#1d1418', '#070506'] : ['#14110f', '#050404'];
-    this.rules = BASE_RULES + (hilo ? HILO_RULES : '');
+    this.rules = BASE_RULES + HILO_RULES.replace('(aide affichée à l’écran)', '(outil facultatif : bouton « Hi-Lo »)');
+    this.showHilo = hilo;
     this.dealer = new Dealer(hilo ? 'Croupière · Inès' : 'Croupier · Julien', hilo ? { skin: '#c98d62', hair: '#1c1412', hairStyle: 'chignon', outfit: 'croupier', color: '#3a0c17', accent: '#d4af5a', hat: 'aucun', glasses: false } : undefined);
   }
 
@@ -96,6 +123,8 @@ export class BlackjackGame implements MiniGame {
   private panelBtns: Button[] = [];
   private panelRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private recap: Recap | null = null;
+  /** Le récapitulatif détaillé se replie en une ligne après quelques secondes : les cartes redeviennent lisibles. */
+  private recapAt = 0;
   private roundTips = 0;
   private before = 0;
   private initialBet = 0;
@@ -115,6 +144,12 @@ export class BlackjackGame implements MiniGame {
     mk('dblCancel', 'Annuler', 'ghost', () => this.closePanel(), 15);
     mk('tableBtn', '', 'ghost', () => this.openPanel('tables'), 13);
     mk('tipBtn', 'Pourboire', 'ghost', () => this.openPanel('tip'), 13);
+    mk('insYes', 'Assurance', 'gold', () => void this.insure(true), 15);
+    mk('insNo', 'Pas d’assurance', 'secondary', () => void this.insure(false), 15);
+    mk('hiloBtn', 'Hi-Lo', 'ghost', () => { this.showHilo = !this.showHilo; }, 13);
+    // Nombre de mains (1 à 5) et choix de la main dont on règle la mise (toucher sa case sur le tapis)
+    this.countBtns = Array.from({ length: MAX_BOXES }, (_, i) => makeButton({ id: `hands-${i + 1}`, label: `${i + 1}`, style: 'secondary', fontSize: 15, onTap: () => this.setBoxCount(i + 1) }));
+    this.boxBtns = Array.from({ length: MAX_BOXES }, (_, i) => makeButton({ id: `box-${i}`, label: '', style: 'ghost', onTap: () => this.selectBox(i), draw: () => {} }));
     this.selectTable(BJ_TABLES.find((t) => t.id === lastTable) ?? BJ_TABLES[1], false);
     this.panel = 'tables';
     this.buildPanel();
@@ -127,9 +162,15 @@ export class BlackjackGame implements MiniGame {
   }
 
   private selectTable(t: BjTable, sound = true): void {
+    const changed = this.tableDef.id !== t.id;
     this.tableDef = t; lastTable = t.id;
+    if (changed && this.host.table) { this.g = new Blackjack(Math.random); this.tablePending = 0; this.recap = null; }
+    this.host.switchTable(this.id, t.id);
     const prev = this.betCtl?.amount;
     this.betCtl = new BetControl(this.host, { presets: presetChips(t.min).filter((v) => v <= t.max), min: t.min, max: t.max, initial: Math.max(t.min, Math.min(t.max, prev ?? t.min * 2)) });
+    // Mises par main : reprises de la manche précédente si elles respectent les limites de cette table
+    const keep = (this.boxBets.length ? this.boxBets : lastBoxBets ?? [this.betCtl.amount]).map((v) => Math.max(t.min, Math.min(t.max, v)));
+    this.boxBets = keep.slice(0, MAX_BOXES); this.selBox = 0; this.betCtl.amount = this.boxBets[0];
     this.btn.tableBtn.label = `Table ${t.name} · ${t.min}–${t.max}`;
     this.rebuildLayer();
     if (this.host.area.w > 0) this.layout();
@@ -139,7 +180,7 @@ export class BlackjackGame implements MiniGame {
   }
 
   private rebuildLayer(): void {
-    this.layer.buttons = [...this.betCtl.buttons, ...Object.values(this.btn), ...this.panelBtns];
+    this.layer.buttons = [...this.boxBtns, ...this.betCtl.buttons, ...this.countBtns, ...Object.values(this.btn), ...this.panelBtns];
   }
 
   // ---------------------------------------------------------------- panneaux
@@ -195,6 +236,7 @@ export class BlackjackGame implements MiniGame {
   // ---------------------------------------------------------------- mise en page
   layout(): void {
     const a = this.host.area, ui = this.host.vp.ui;
+    this.host.result.anchorY = 0.2;   // bannière de gain au-dessus des cartes du croupier
     // Barre de mise (jetons + réglages + Distribuer) ; pendant la main, les actions prennent la même place
     const used = this.betCtl.layout(a, ui, [[this.btn.deal, 210]]);
     const bh = this.btn.deal.h, bw = Math.min(140 * ui, (a.w - 30 * ui) / 4);
@@ -204,21 +246,71 @@ export class BlackjackGame implements MiniGame {
     };
     row(['hit', 'stand', 'double', 'split']);
     row(['dblUp', 'dblDown', 'dblCancel'], Math.min(170 * ui, (a.w - 30 * ui) / 3));
+    row(['insYes', 'insNo'], Math.min(230 * ui, (a.w - 30 * ui) / 2));
     // Table et pourboire : coins supérieurs
     const th = Math.max(36, 34 * ui), portrait = a.h > a.w;
     const tw = Math.min(portrait ? a.w * 0.4 : 230 * ui, 260 * ui);
     Object.assign(this.btn.tableBtn, { x: a.x, y: a.y, w: tw, h: th });
     Object.assign(this.btn.tipBtn, { x: a.x + a.w - Math.min(130 * ui, a.w * 0.3), y: a.y, w: Math.min(130 * ui, a.w * 0.3), h: th });
+    Object.assign(this.btn.hiloBtn, { x: this.btn.tipBtn.x - Math.min(86 * ui, a.w * 0.18) - 8 * ui, y: a.y, w: Math.min(86 * ui, a.w * 0.18), h: th });
     // Pendant la main, seule la ligne d'actions est réservée en bas : la table gagne la place des réglages
     const reserve = this.betting ? used : bh + 8 * ui;
     const tableH = a.h - reserve - 6 * ui;
     const k = portrait ? Math.max(1.6, Math.min(2.6, tableH / 160)) : Math.max(1.1, Math.min(1.9, tableH / 160));
-    this.dealerPos = { x: a.x + a.w / 2, y: a.y + Math.max(38 * k, th + 30 * ui), k };
+    // En portrait, pendant les mises, le croupier descend sous le sélecteur du nombre de mains (rien ne se chevauche)
+    const cb = Math.max(44, 40 * ui);
+    const dy = Math.max(38 * k, th + 30 * ui, portrait && this.betting ? th + 6 * ui + cb + 84 * ui : 0);
+    this.dealerPos = { x: a.x + a.w / 2, y: a.y + dy, k };
     this.table = { x: a.x + a.w * 0.03, y: this.dealerPos.y - 4 * ui, w: a.w * 0.94, h: tableH - (this.dealerPos.y - a.y) + 4 * ui };
-    this.cardW = Math.min((this.table.h - 60 * ui) / 2 / 1.4 * 0.92, (portrait ? 84 : 74) * ui, a.w / (portrait ? 5.2 : 8));
+    // Hauteur : cartes du croupier + étiquette + cartes et jetons du joueur doivent tenir sur le tapis sans se chevaucher
+    this.cardW = Math.min((this.table.h - 104 * ui) / 2 / 1.4, (portrait ? 84 : 74) * ui, a.w / (portrait ? 5.2 : 8));
+    // Plusieurs mains (séparations, joueurs de la table) : cartes réduites pour que tout reste lisible
+    const nh = this.g.hands.length;
+    if (nh >= 3) this.cardW = Math.min(this.cardW, a.w / (nh * 2.1 + 0.6));
     this.laidOutBetting = this.betting;
+    // Sélecteur du nombre de mains : sous le bouton de table, à gauche
+    this.countBtns.forEach((b, i) => Object.assign(b, { x: a.x + i * (cb + 4 * ui), y: a.y + th + 6 * ui, w: cb, h: cb }));
     this.layoutPanel();
   }
+
+  /** Cases de mise (une par main préparée) : touchables pour choisir la main dont on règle la mise. */
+  private layoutBoxes(): void {
+    const ui = this.host.vp.ui, n = this.boxBets.length;
+    this.boxBtns.forEach((b, i) => {
+      if (i >= n) { b.visible = false; return; }
+      const sp = this.spot(i, n), w = Math.max(48, Math.min(this.cardW * 2.2, 110 * ui)), h = Math.max(44, this.cardW * 1.6);
+      Object.assign(b, { x: sp.x - w / 2, y: sp.y - h + 16 * ui, w, h });
+    });
+  }
+
+  private setBoxCount(n: number): void {
+    if (!this.betting || this.waiting || this.tablePending > 0) return;
+    n = Math.max(1, Math.min(MAX_BOXES, this.host.table ? Math.min(n, Math.max(1, this.freeBoxes)) : n));
+    this.clearSettled();
+    const base = this.boxBets[this.selBox] ?? this.betCtl.amount;
+    while (this.boxBets.length < n) this.boxBets.push(base);
+    this.boxBets.length = n;
+    this.selBox = Math.min(this.selBox, n - 1);
+    this.betCtl.amount = this.boxBets[this.selBox];
+    this.recap = null;
+    this.host.s.audio.chip();
+  }
+
+  private selectBox(i: number): void {
+    if (!this.betting || this.waiting || i >= this.boxBets.length || this.tablePending > 0) return;
+    this.clearSettled();
+    this.selBox = i; this.betCtl.amount = this.boxBets[i];
+    this.host.s.audio.tick();
+  }
+
+  /** Manche terminée encore affichée : on la range pour préparer les nouvelles cases de mise. */
+  private clearSettled(): void {
+    if (this.g.phase !== 'settled' || this.settlePending || this.flights.busy) return;
+    this.g = new Blackjack(Math.random); this.recap = null; this.times.clear(); this.cardsSeen.clear();
+    this.layout();
+  }
+
+  private get boxTotal(): number { return this.boxBets.reduce((a, b) => a + b, 0); }
 
   private layoutPanel(): void {
     const a = this.host.area, ui = this.host.vp.ui, gap = 10 * ui;
@@ -246,18 +338,79 @@ export class BlackjackGame implements MiniGame {
   handlers(): PointerHandler[] { return [this.layer]; }
 
   canQuit() {
-    return this.g.phase === 'player' || this.waiting || this.settlePending ? { ok: false as const, reason: 'Termine la main en cours avant de quitter' } : { ok: true as const };
+    if (this.host.table) return this.tablePending > 0 || (this.myInRound && (this.g.phase === 'player' || this.g.phase === 'insurance' || this.g.phase === 'dealer')) || this.settlePending ? { ok: false as const, reason: 'Ta main est en jeu à la table : attends le règlement' } : { ok: true as const };
+    return this.g.phase === 'player' || this.g.phase === 'insurance' || this.waiting || this.settlePending ? { ok: false as const, reason: 'Termine la main en cours avant de quitter' } : { ok: true as const };
   }
 
   private get betting(): boolean { return this.g.phase === 'betting' || this.g.phase === 'settled'; }
+  /** Ai-je une main dans la manche affichée (toujours vrai en solo) ? */
+  private get myInRound(): boolean { return !this.host.table || this.myBoxes.length > 0; }
+  /** Mes mains (en solo : toutes). */
+  private myHands(): Hand[] { return this.host.table ? this.g.hands.filter((h) => this.myBoxes.includes(h.seat ?? 0)) : this.g.hands; }
+  /** La main est-elle à moi (solo : toujours) ? */
+  private isMine(h: Hand): boolean { return !this.host.table || this.myBoxes.includes(h.seat ?? 0); }
+  /** Libellé d'une main : « Main 2 » (séparée : « Main 2 · b »), ou le nom du joueur à une table partagée. */
+  private handLabel(h: Hand, idx: number): string {
+    const box = h.seat ?? 0, mine = this.isMine(h);
+    const sameBox = this.g.hands.filter((x) => (x.seat ?? 0) === box);
+    const sub = sameBox.length > 1 ? ` · ${'abcd'[sameBox.indexOf(this.g.hands[idx])] ?? ''}` : '';
+    if (!mine) return `${this.seatNames[box] ?? 'Joueur'}${sub}`;
+    const order = this.host.table ? this.myBoxes.indexOf(box) : box;
+    const multi = this.host.table ? this.myBoxes.length > 1 : this.g.seats > 1;
+    return `${this.host.table ? 'Toi' : 'Main'}${multi || !this.host.table ? ` ${order + 1}` : ''}${sub}`;
+  }
+
+  /** Table partagée : l'état diffusé par le serveur remplace la vue (toutes les places, ma place, mes actions). */
+  private syncTable(): void {
+    const t = this.host.table, st = t?.state;
+    if (!t || !st) return;
+    const d = st.data as { view: Record<string, unknown> | null; myBoxes: number[]; freeBoxes: number; seatsOf: Array<{ id: string; name: string; bet: number }>; pending: Array<{ id: string; bet: number }>; running: number; remaining: number; table: string };
+    if (d.table && d.table !== this.tableDef.id) return;
+    this.tablePending = d.pending?.find((p) => p.id === st.you)?.bet ?? 0;
+    if (typeof d.freeBoxes === 'number') {
+      this.freeBoxes = d.freeBoxes;
+      if (this.tablePending === 0 && this.boxBets.length > Math.max(1, d.freeBoxes)) this.boxBets.length = Math.max(1, d.freeBoxes);
+      this.selBox = Math.min(this.selBox, this.boxBets.length - 1);
+    }
+    if (typeof d.running === 'number') this.running = d.running;
+    if (!d.view) {
+      if (st.phase === 'open' || st.phase === 'betting') { if (this.g.phase !== 'settled' && this.g.phase !== 'betting') this.g = new Blackjack(Math.random); }
+      return;
+    }
+    const fresh = this.tableRound !== st.round;
+    const myStake = d.seatsOf.filter((x) => x.id === st.you).reduce((a, x) => a + x.bet, 0);
+    if (fresh) { this.tableRound = st.round; this.recap = null; this.before = this.host.s.chips.balance + myStake; }
+    this.myBoxes = d.myBoxes ?? [];
+    this.seatNames = d.seatsOf.map((x) => (x.id === st.you ? 'Toi' : x.name));
+    const v: Record<string, unknown> = { ...d.view, running: d.running, remaining: d.remaining };
+    if (!fresh && JSON.stringify(v) === this.lastSig) return;
+    this.lastSig = JSON.stringify(v);
+    if (fresh && this.myBoxes.length) { this.initialBet = myStake; this.roundTips = 0; }
+    this.applyView(v, fresh);
+    // Règlement de la manche commune : mes mains seulement (gain réel crédité par le serveur)
+    if (v.phase === 'settled' && this.myBoxes.length && this.settledRound !== st.round) {
+      this.settledRound = st.round;
+      this.afterAction(true, this.myBoxes.reduce((a, b) => a + this.g.seatPayout(b), 0));
+    }
+  }
+  private lastSig = '';
+  private settledRound = -1;
 
   /** Reconstruit l'état affiché à partir de la vue publique envoyée par l'autorité, et planifie l'arrivée des cartes. */
   private applyView(v: Record<string, unknown>, fresh: boolean): void {
     const prevPhase = this.g.phase;
-    this.g = Blackjack.restore({ phase: v.phase as Phase, hands: v.hands as Hand[], dealer: v.dealer as Card[], active: v.active as number, shoe: [] }, Math.random);
-    this.can = (v.can as typeof this.can) ?? { hit: false, stand: false, double: false, split: false };
+    const ins = v.insurance && typeof v.insurance === 'object' ? ('amount' in (v.insurance as object) ? { 0: v.insurance as Insurance } : v.insurance as Record<number, Insurance>) : {};
+    this.g = Blackjack.restore({ phase: v.phase as Phase, hands: v.hands as Hand[], dealer: v.dealer as Card[], active: v.active as number, shoe: [], insurance: ins }, Math.random);
+    this.insurance = ins;
+    this.can = { hit: false, stand: false, double: false, split: false, insurance: false, ...((v.can as Partial<typeof this.can>) ?? {}) };
     if (typeof v.running === 'number') this.running = v.running;
-    if (typeof v.remaining === 'number') this.remaining = v.remaining;
+    this.insureBox = typeof v.insureSeat === 'number' ? v.insureSeat : -1;
+    if (v.phase === 'insurance' && this.can.insurance) this.message = '';
+    if (typeof v.remaining === 'number') {
+      // Sabot remélangé par l'autorité : battage audible et annonce
+      if (this.remaining > 0 && v.remaining > this.remaining + 20) { this.host.s.audio.shuffle(); this.host.toasts.show('Le croupier remélange le sabot', 'info'); }
+      this.remaining = v.remaining;
+    }
     this.schedule(fresh, prevPhase);
   }
 
@@ -280,9 +433,12 @@ export class BlackjackGame implements MiniGame {
     };
     if (fresh) {
       // Ordre réel : joueur, croupier, joueur, croupier
-      const h = g.hands[0];
-      // La deuxième carte du croupier arrive toujours face cachée (retournée au règlement)
-      if (h) { place('h0:0', h.cards[0]); if (g.dealer[0]) place('d:0', g.dealer[0]); if (h.cards[1]) place('h0:1', h.cards[1]); if (g.dealer[1]) place('d:1', g.dealer[1], true); }
+      // Une carte à chaque main (dans l'ordre des places), une au croupier, une seconde à chaque main, puis la
+      // deuxième carte du croupier, toujours face cachée (retournée au règlement)
+      g.hands.forEach((h, j) => { if (h.cards[0]) place(`h${j}:0`, h.cards[0]); });
+      if (g.dealer[0]) place('d:0', g.dealer[0]);
+      g.hands.forEach((h, j) => { if (h.cards[1]) place(`h${j}:1`, h.cards[1]); });
+      if (g.dealer[1]) place('d:1', g.dealer[1], true);
     }
     // Carte d'un double face cachée : posée retournée, même si la réponse contient déjà le règlement
     g.hands.forEach((h, j) => h.cards.forEach((c, i) => place(`h${j}:${i}`, c, !!h.hiddenDouble && i === h.cards.length - 1)));
@@ -312,24 +468,43 @@ export class BlackjackGame implements MiniGame {
 
   private spot(i: number, n: number): { x: number; y: number } {
     const F = this.felt, ui = this.host.vp.ui;
-    return { x: F.x + F.w / 2 + (i - (n - 1) / 2) * Math.min(F.w * 0.3, this.cardW * 3.2), y: F.y + F.h - 20 * ui };
+    // Espacement borné par la largeur du tapis : jusqu'à 5 mains principales et leurs séparations restent visibles
+    const step = Math.min(F.w * 0.3, this.cardW * 3.2, (F.w * 0.92) / Math.max(1, n));
+    return { x: F.x + F.w / 2 + (i - (n - 1) / 2) * step, y: F.y + F.h - 20 * ui };
   }
 
   private async deal(): Promise<void> {
-    const s = this.host.s, bet = this.betCtl.amount, t = this.tableDef;
+    const s = this.host.s, t = this.tableDef;
     if (!this.betting || this.waiting || this.settlePending) return;
+    this.boxBets[this.selBox] = this.betCtl.amount;
+    const bets = this.boxBets.slice(0, MAX_BOXES), bet = this.boxTotal;
     if (this.tableLocked(t)) { this.host.toasts.show(`Table ${t.name} : niveau ${t.level} requis`, 'error'); return; }
-    if (!s.chips.canAfford(bet)) { this.host.toasts.show('Pas assez de jetons pour cette mise : passe à la caisse du casino', 'error'); s.audio.error(); return; }
+    // Vérifications locales (l'autorité refait les mêmes) : limites de la table pour chaque main, solde pour le total
+    const bad = bets.findIndex((b) => !Number.isInteger(b) || b < t.min || b > t.max);
+    if (bad >= 0) { this.host.toasts.show(`Main ${bad + 1} : mise entre ${t.min} et ${t.max} jetons`, 'error'); s.audio.error(); return; }
+    if (!s.chips.canAfford(bet)) { this.host.toasts.show(bets.length > 1 ? `Pas assez de jetons pour ${bets.length} mains (${bet} jetons)` : 'Pas assez de jetons pour cette mise : passe à la caisse du casino', 'error'); s.audio.error(); return; }
     this.waiting = true;
     const before = s.chips.balance;
-    const r = await s.ask('casino', this.id, 'deal', { bet, table: t.id });
+    if (this.host.table) {
+      // Table partagée : les mises rejoignent la prochaine distribution (tous les joueurs servis ensemble)
+      const acc = s.absorb('casino', this.id, 'bet', await this.host.table.bet({ bets }));
+      this.waiting = false;
+      if (!acc.ok) { this.host.toasts.show(acc.error, 'error'); s.audio.error(); return; }
+      lastBoxBets = [...bets];
+      this.tablePending = bet; this.before = before; this.betCtl.remember(this.betCtl.amount); this.recap = null;
+      this.g = new Blackjack(Math.random);
+      this.message = 'Mise posée : distribution à la fin du compte à rebours.';
+      s.audio.chip();
+      return;
+    }
+    const r = await s.ask('casino', this.id, 'deal', bets.length > 1 ? { bets, table: t.id } : { bet: bets[0], table: t.id });
     this.waiting = false;
     if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
     this.before = before; this.initialBet = bet; this.roundTips = 0; this.recap = null;
-    this.betCtl.remember(bet);
-    // Les jetons partent du joueur vers la case de mise
-    const sp = this.spot(0, 1);
-    this.flights.add({ x: sp.x, y: this.host.area.y + this.host.area.h }, sp, bet, 12 * this.host.vp.ui, 0.4);
+    lastBoxBets = [...bets];
+    this.betCtl.remember(this.betCtl.amount);
+    // Les jetons partent du joueur vers chaque case de mise
+    bets.forEach((b, i) => { const sp = this.spot(i, bets.length); this.flights.add({ x: sp.x, y: this.host.area.y + this.host.area.h }, sp, b, 12 * this.host.vp.ui, 0.4, i * 0.08); });
     s.audio.chip();
     this.applyView(r.view, true);
     this.dealer.play('deal', STEP * 4);
@@ -343,6 +518,13 @@ export class BlackjackGame implements MiniGame {
     if ((kind === 'double' || kind === 'split') && !s.chips.canAfford(g.current!.bet)) { this.host.toasts.show('Pas assez de jetons', 'error'); s.audio.error(); return; }
     if (this.panel === 'double') this.closePanel();
     this.waiting = true;
+    if (this.host.table) {
+      const r = s.absorb('casino', this.id, 'act', await this.host.table.act(kind === 'double' ? { move: kind, faceDown } : { move: kind }));
+      this.waiting = false;
+      if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
+      if (kind === 'double' || kind === 'split') s.audio.chip();
+      return;
+    }
     const r = await s.ask('casino', this.id, 'act', kind === 'double' ? { move: kind, faceDown } : { move: kind });
     this.waiting = false;
     if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
@@ -357,6 +539,25 @@ export class BlackjackGame implements MiniGame {
     this.afterAction(r.done, r.payout);
   }
 
+  /** Assurance (croupier montrant un As) : moitié de la mise, payée 2:1 si le croupier a blackjack. */
+  private async insure(take: boolean): Promise<void> {
+    const s = this.host.s;
+    if (this.waiting || this.g.phase !== 'insurance' || !this.can.insurance || this.insureBox < 0) return;
+    const seat = this.insureBox;
+    const cost = insuranceCost(this.g.hands.find((h) => (h.seat ?? 0) === seat)?.bet ?? 0);
+    if (take && !s.chips.canAfford(cost)) { this.host.toasts.show('Pas assez de jetons pour l’assurance', 'error'); s.audio.error(); return; }
+    this.waiting = true;
+    const r = this.host.table
+      ? s.absorb('casino', this.id, 'act', await this.host.table.act({ move: 'insurance', take, seat }))
+      : await s.ask('casino', this.id, 'act', { move: 'insurance', take, seat });
+    this.waiting = false;
+    if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
+    if (take) { s.audio.chip(); this.host.toasts.show(`Assurance prise : ${cost} jetons`, 'info', 1.8); }
+    if (this.host.table) return;
+    this.applyView(r.view, false);
+    this.afterAction(r.done, r.payout);
+  }
+
   private afterAction(done: boolean, payout: number): void {
     if (!done) return;
     this.settlePending = { payout };
@@ -365,13 +566,21 @@ export class BlackjackGame implements MiniGame {
   /** Règlement montré une fois les cartes retournées : jetons payés ou ramassés, récapitulatif. */
   private showSettlement(payout: number): void {
     const g = this.g, s = this.host.s;
-    const stake = g.totalStake, net = payout - stake;
-    const bonus = g.hands.reduce((a, h) => a + (h.bonus ?? 0), 0);
-    const natural = g.hands.some((h) => h.outcome === 'blackjack');
+    const mine = this.myHands();
+    const boxes = this.host.table ? this.myBoxes : Array.from({ length: g.seats }, (_, i) => i);
+    const insList = boxes.map((b) => ({ b, ins: this.insurance[b] })).filter((x) => x.ins && x.ins.amount > 0);
+    const insStake = insList.reduce((a, x) => a + x.ins!.amount, 0);
+    // Mise totale de chaque main (mise initiale + double ; une séparation crée une main avec sa propre mise)
+    const stake = mine.reduce((a, h) => a + h.bet, 0) + insStake, net = payout - stake;
+    const bonus = mine.reduce((a, h) => a + (h.bonus ?? 0), 0);
+    const natural = mine.some((h) => h.outcome === 'blackjack');
+    this.recapAt = this.t;
+    const lines: RecapLine[] = mine.map((h) => ({ label: this.handLabel(h, g.hands.indexOf(h)), stake: h.bet, outcome: OUTCOME_LABEL[h.outcome ?? 'lose'] + (h.doubled ? ' (doublée)' : ''), payout: h.payout ?? 0, net: (h.payout ?? 0) - h.bet }));
+    for (const { b, ins } of insList) lines.push({ label: `Assurance${boxes.length > 1 ? ` main ${boxes.indexOf(b) + 1}` : ''}`, stake: ins!.amount, outcome: ins!.payout > 0 ? 'payée 2:1' : 'perdue', payout: ins!.payout, net: ins!.payout - ins!.amount });
     this.recap = {
       before: this.before, initial: this.initialBet, extra: stake - this.initialBet, payout, bonus, stake, natural,
       dealerPeek: g.dealer.length === 2 && handValue(g.dealer).total === 21,
-      hands: g.hands.map((h) => ({ outcome: h.outcome ?? 'lose', net: (h.payout ?? 0) - h.bet })),
+      hands: lines,
     };
     const ui = this.host.vp.ui, d = this.dealer.hand(this.dealerPos.x, this.dealerPos.y, this.dealerPos.k);
     g.hands.forEach((h, i) => {
@@ -380,34 +589,70 @@ export class BlackjackGame implements MiniGame {
       else if (h.outcome && h.outcome !== 'push') this.flights.add(d, sp, (h.payout ?? 0) - h.bet, 12 * ui, 0.55, 0.1);
     });
     this.dealer.play(natural ? 'congrats' : net > 0 ? 'pay' : net < 0 ? 'collect' : 'pay', 1.6);
-    if (natural) { s.audio.jackpot(); s.haptic([40, 60, 40]); } else if (net > 0) s.audio.win(); else if (net < 0) s.audio.lose(); else s.audio.chip();
+    // Gain : bannière commune (le récapitulatif détaillé reste affiché) ; perte ou égalité : sons seuls
+    if (net > 0) this.host.celebrate(net, stake, natural ? 'Blackjack !' : mine.length > 1 ? `${mine.length} mains · bilan net` : '');
+    else if (net < 0) s.audio.lose(); else s.audio.push();
+    if (natural) s.haptic([40, 60, 40]);
   }
 
   private get trueCount(): number { return this.running / Math.max(0.5, this.remaining / 52); }
 
   get holdBalance(): boolean { return this.flights.busy || !!this.settlePending; }
+  /** Le récapitulatif par main (mise, résultat, net) et le bilan global sont affichés sur le tapis. */
+  readonly ownSettlement = true;
 
   update(dt: number): void {
     this.t += dt;
     this.thanksT = Math.max(0, this.thanksT - dt);
+    if (this.host.table) this.syncTable();
     this.dealer.update(dt);
     this.flights.update(dt);
     // Bruit de chaque carte au moment où elle part
     for (const tm of this.times.values()) if (!tm.sounded && this.t >= tm.at) { tm.sounded = true; this.host.s.audio.card(); }
     if (this.settlePending && this.t >= this.settleAt) { const p = this.settlePending.payout; this.settlePending = null; this.showSettlement(p); }
     const g = this.g, s = this.host.s;
-    const bet = this.betting && !this.settlePending;
+    const bet = this.betting && !this.settlePending && this.tablePending === 0 && (!this.host.table || this.host.table.state?.phase === 'open' || this.host.table.state?.phase === 'betting' || this.host.table.state?.phase === 'show' || !this.host.table.state);
     const panel = this.panel;
     this.betCtl.locked = !bet || this.waiting || !!panel;
+    // La mise réglée s'applique à la main sélectionnée ; les autres mains comptent comme déjà engagées
+    if (bet && !panel) this.boxBets[this.selBox] = this.betCtl.amount;
+    this.betCtl.engaged = 0;
     this.betCtl.sync();
     this.betCtl.setShown(bet && panel !== 'tables');
+    const nb = this.boxBets.length, total = this.boxTotal;
     this.btn.deal.visible = bet && panel !== 'tables';
-    this.btn.deal.label = g.phase === 'settled' ? `Rejouer · ${this.betCtl.amount}` : `Distribuer · ${this.betCtl.amount}`;
-    this.btn.deal.enabled = !this.waiting && !panel && s.chips.canAfford(this.betCtl.amount) && !this.tableLocked(this.tableDef);
-    const playing = !this.betting;
+    const what = nb > 1 ? `${nb} mains · ${total}` : `${total}`;
+    this.btn.deal.label = this.host.table ? `Miser · ${what}` : g.phase === 'settled' ? `Rejouer · ${what}` : `Distribuer · ${what}`;
+    this.btn.deal.enabled = !this.waiting && !panel && s.chips.canAfford(total) && !this.tableLocked(this.tableDef);
+    const maxBoxes = this.host.table ? Math.max(1, Math.min(MAX_BOXES, this.freeBoxes)) : MAX_BOXES;
+    this.countBtns.forEach((b, i) => { b.visible = bet && !panel; b.active = i + 1 === nb; b.enabled = !this.waiting && i < maxBoxes; });
+    this.layoutBoxes();
+    this.boxBtns.forEach((b, i) => { b.visible = bet && !panel && i < nb; b.enabled = !this.waiting; });
+    if (bet && !panel && !this.recap && (!this.host.table || this.tablePending === 0)) {
+      this.message = !s.chips.canAfford(total) ? `Solde insuffisant pour ${nb > 1 ? `${nb} mains (${total} jetons)` : 'cette mise'} : réduis les mises ou passe à la caisse.`
+        : nb > 1 ? `Main ${this.selBox + 1} sélectionnée : règle sa mise · touche une case pour changer de main` : 'Choisis ta mise (1 à 5 mains) puis touche « Distribuer ».';
+    }
+    const playing = !this.betting && g.phase !== 'insurance' && this.myInRound;
     const dealing = this.t < this.queue - STEP * 0.5; // on attend que les cartes soient posées
     for (const id of ['hit', 'stand', 'double', 'split']) this.btn[id].visible = playing && panel !== 'double';
     for (const id of ['dblUp', 'dblDown', 'dblCancel']) this.btn[id].visible = playing && panel === 'double';
+    const insuring = g.phase === 'insurance' && this.can.insurance;
+    this.btn.insYes.visible = this.btn.insNo.visible = insuring && !panel;
+    const insHand = this.g.hands.find((h) => (h.seat ?? 0) === this.insureBox);
+    const cost = insuranceCost(insHand?.bet ?? 0);
+    const insName = insHand && this.myHands().length > 1 ? `${this.handLabel(insHand, this.g.hands.indexOf(insHand))} · ` : '';
+    this.btn.insYes.label = `Assurance ${insName}${cost} jetons`;
+    this.btn.insYes.enabled = this.btn.insNo.enabled = !this.waiting && !dealing;
+    this.btn.insYes.enabled &&= s.chips.canAfford(cost);
+    this.btn.hiloBtn.label = this.showHilo ? 'Hi-Lo ✓' : 'Hi-Lo';
+    this.btn.hiloBtn.visible = panel !== 'tables';
+    if (this.host.table && this.tablePending > 0 && !panel) {
+      const secs = Math.ceil(this.host.table.endsIn / 1000);
+      this.message = `Mise de ${this.tablePending} posée · distribution${secs > 0 ? ` dans ${secs} s` : ' imminente'}`;
+    } else if (this.host.table && !this.myInRound && !this.betting) this.message = 'Main en cours à la table : tu joueras à la prochaine distribution.';
+    else if (this.host.table && g.phase === 'player' && !this.myBoxes.includes(this.g.activeSeat) && this.myInRound) this.message = `Au tour de ${this.seatNames[this.g.activeSeat] ?? 'un joueur'}…`;
+    else if (g.phase === 'player' && this.myHands().length > 1 && g.current && this.isMine(g.current)) this.message = `${this.handLabel(g.current, g.active)} : à toi de jouer (${this.shownValue(`h${g.active}`, g.current.cards).text})`;
+    else if (g.phase === 'insurance' && this.can.insurance) this.message = 'Le croupier montre un As : assurance ?';
     const w = this.waiting || dealing || panel === 'tables' || panel === 'tip';
     this.btn.hit.enabled = !w && this.can.hit;
     this.btn.stand.enabled = !w && this.can.stand;
@@ -461,7 +706,11 @@ export class BlackjackGame implements MiniGame {
     this.felt = drawTable(ctx, this.table, ui, this.hilo ? 'bordeaux' : this.tableDef.id === 'vip' ? 'black' : this.tableDef.id === 'premium' ? 'blue' : 'green');
     const F = this.felt;
     const tableName = `KS · Table ${this.tableDef.name}${this.hilo ? ' · Hi-Lo' : ''} · ${this.tableDef.min}–${this.tableDef.max.toLocaleString('fr-FR')}`;
-    if (F.w > 520 * ui) {
+    // Inscriptions du tapis : masquées quand 3 mains ou plus occupent la largeur (elles passeraient sous les étiquettes)
+    const crowded = Math.max(g.hands.length, g.phase === 'betting' && !g.hands.length ? this.boxBets.length : 0) >= 3;
+    if (crowded && F.w > 520 * ui) {
+      feltText(ctx, tableName, F.x + F.w * 0.17, F.y + 16 * ui, 8.5 * ui, 0.4);
+    } else if (F.w > 520 * ui) {
       feltText(ctx, 'Blackjack payé 3 pour 2 + bonus 50 %', F.x + F.w * 0.2, F.y + F.h * 0.5, 10 * ui);
       feltText(ctx, 'Le croupier reste sur 17', F.x + F.w * 0.8, F.y + F.h * 0.5, 10 * ui);
       feltText(ctx, tableName, F.x + F.w * 0.2, F.y + F.h * 0.58, 9 * ui, 0.4);
@@ -483,34 +732,48 @@ export class BlackjackGame implements MiniGame {
       const dw = this.cardW + this.cardW * 0.42 * (g.dealer.length - 1);
       drawPill(ctx, `Croupier · ${dv.text}`, F.x + F.w / 2 - dw / 2 - 58 * ui, F.y + 8 * ui + h * 0.5, 11 * ui, 'rgba(0,0,0,0.6)', LUXE.ivory);
     }
-    // Cases de mise et mains du joueur
+    // Cases de mise : avant la distribution, une case par main préparée (mise affichée, main sélectionnée en or)
+    const py = this.spot(0, 1).y - 18 * ui - h;
+    const preparing = g.phase === 'betting' && !g.hands.length;
+    if (preparing) {
+      const nb = this.boxBets.length;
+      this.boxBets.forEach((b, i) => {
+        const sp = this.spot(i, nb), sel = i === this.selBox && nb > 1;
+        ctx.save(); ctx.strokeStyle = sel ? LUXE.gold : 'rgba(239,220,174,0.45)'; ctx.lineWidth = sel ? 2.6 : 1.4;
+        ctx.beginPath(); ctx.ellipse(sp.x, sp.y, 24 * ui, 12 * ui, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+        drawChipStack(ctx, sp.x, sp.y + 4 * ui, 15 * ui, b, 8);
+        drawPill(ctx, `Main ${i + 1} · ${b.toLocaleString('fr-FR')}`, sp.x, sp.y - 30 * ui, 11 * ui, sel ? PAL.gold : 'rgba(0,0,0,0.6)', sel ? '#1a1208' : LUXE.ivory);
+      });
+    }
+    // Mains distribuées : cartes, total, mise, état (active, terminée, résultat)
     const n = Math.max(1, g.hands.length);
     const shown = !this.settlePending;
-    for (let i = 0; i < n; i++) {
-      const sp = this.spot(i, n);
-      ctx.save(); ctx.strokeStyle = 'rgba(239,220,174,0.45)'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.ellipse(sp.x, sp.y, 22 * ui, 11 * ui, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
-      const hand = g.hands[i];
-      const lost = hand?.outcome === 'lose' && shown && !!this.recap;
-      const amt = hand && !(lost && !this.flights.busy) ? hand.bet : this.betting && !hand ? this.betCtl.amount : 0;
-      if (amt > 0) drawChipStack(ctx, sp.x, sp.y + 4 * ui, 15 * ui, amt, 8);
-    }
-    const py = this.spot(0, 1).y - 18 * ui - h;
     g.hands.forEach((hand, i) => {
-      const cx = this.spot(i, n).x;
+      const sp = this.spot(i, n), cx = sp.x, mine = this.isMine(hand);
+      ctx.save(); ctx.strokeStyle = mine ? 'rgba(239,220,174,0.55)' : 'rgba(239,220,174,0.25)'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.ellipse(sp.x, sp.y, 22 * ui, 11 * ui, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+      const lost = hand.outcome === 'lose' && shown && !!this.recap;
+      if (!(lost && !this.flights.busy)) drawChipStack(ctx, sp.x, sp.y + 4 * ui, 15 * ui, hand.bet, 8);
+      drawLabel(ctx, `${hand.bet.toLocaleString('fr-FR')}`, sp.x, sp.y + 22 * ui, 10 * ui, mine ? LUXE.champagne : PAL.textDim, 'center', 800);
       this.drawHand(ctx, `h${i}`, hand.cards, cx, py, from);
       const v = this.shownValue(`h${i}`, hand.cards);
-      const active = g.phase === 'player' && i === g.active && n > 1;
-      const res = hand.outcome && this.recap ? ` · ${OUTCOME_LABEL[hand.outcome]}` : '';
-      const label = `${v.text}${hand.hiddenDouble && v.hidden ? ' (double caché)' : ''}${res}`;
-      const cw = this.cardW + this.cardW * 0.42 * (hand.cards.length - 1);
-      drawPill(ctx, label, cx + cw / 2 + 40 * ui, py + h * 0.5, 12 * ui, active ? PAL.gold : 'rgba(0,0,0,0.6)', active ? '#1a1208' : LUXE.ivory);
+      const active = g.phase === 'player' && i === g.active;
+      const res = hand.outcome && this.recap ? ` · ${OUTCOME_LABEL[hand.outcome]}` : hand.done && g.phase === 'player' && !v.hidden ? ' ✓' : '';
+      const named = n > 1 || !!this.host.table;
+      const label = `${named ? `${this.handLabel(hand, i)} · ` : ''}${v.text}${hand.hiddenDouble && v.hidden ? ' (double caché)' : ''}${res}`;
+      const tone = hand.outcome && this.recap ? (hand.outcome === 'lose' ? 'rgba(120,30,40,0.85)' : hand.outcome === 'push' ? 'rgba(60,60,70,0.85)' : 'rgba(30,110,70,0.9)') : 'rgba(0,0,0,0.6)';
+      drawPill(ctx, label, cx, py - 12 * ui, (n > 3 ? 10 : 12) * ui, active ? PAL.gold : tone, active ? '#1a1208' : LUXE.ivory, Math.min(this.spot(1, Math.max(2, n)).x - this.spot(0, Math.max(2, n)).x, 220 * ui) - 4 * ui);
+      if (active) { ctx.save(); ctx.strokeStyle = LUXE.gold; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.ellipse(sp.x, sp.y, 26 * ui, 13 * ui, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
     });
     this.flights.render(ctx);
-    const midY = (F.y + 8 * ui + h + py) / 2;
+    // Entre les cartes du croupier et les étiquettes des mains (pastilles au-dessus des cartes)
+    const midY = (F.y + 8 * ui + h + py - 26 * ui) / 2;
+    // Pendant le jeu, la consigne n'est affichée que si elle tient entre les cartes du croupier et les étiquettes des
+    // mains (sinon la main active reste signalée par son étiquette dorée et son anneau)
+    const roomForNote = (py - 26 * ui) - (F.y + 8 * ui + h) >= 34 * ui;
     if (this.recap && !this.settlePending) this.renderRecap(ctx, a.x + a.w / 2, midY, Math.min(F.w * 0.86, 560 * ui), ui);
-    else if (this.message && this.betting && !this.settlePending) drawPill(ctx, this.message, a.x + a.w / 2, midY, 14 * ui, 'rgba(14,11,16,0.9)', PAL.text);
-    if (this.hilo) {
-      // Panneau du comptage Hi-Lo
+    else if (this.message && (this.betting || ((!!this.host.table || (g.phase === 'player' && this.myHands().length > 1 && !this.flights.busy)) && (roomForNote || !g.hands.length))) && !this.settlePending) drawNote(ctx, this.message, a.x + a.w / 2, midY, 14 * ui, 'rgba(14,11,16,0.9)', PAL.text, F.w * 0.92);
+    if (this.showHilo) {
+      // Panneau du comptage Hi-Lo (outil facultatif)
       const px = F.x + 10 * ui, py2 = F.y + 10 * ui;
       roundRect(ctx, px, py2, 140 * ui, 84 * ui, 12 * ui); ctx.fillStyle = 'rgba(14,11,16,0.85)'; ctx.fill(); ctx.strokeStyle = 'rgba(212,175,90,0.7)'; ctx.lineWidth = 1.2; ctx.stroke();
       drawLabel(ctx, 'Comptage Hi-Lo', px + 70 * ui, py2 + 13 * ui, 11 * ui, LUXE.champagne);
@@ -519,7 +782,7 @@ export class BlackjackGame implements MiniGame {
       drawLabel(ctx, `Réel ${tc > 0 ? '+' : ''}${tc.toFixed(1).replace('.', ',')}`, px + 70 * ui, py2 + 51 * ui, 13 * ui, tc >= 2 ? PAL.success : tc <= -2 ? PAL.danger : PAL.text);
       drawLabel(ctx, tc >= 2 ? 'Favorable au joueur' : tc <= -2 ? 'Défavorable' : 'Neutre', px + 70 * ui, py2 + 70 * ui, 10 * ui, PAL.textDim, 'center', 600);
     }
-    if (this.betting && this.panel !== 'tables' && !this.settlePending) this.betCtl.render(ctx, ui, this.roundTips ? `Pourboires : ${this.roundTips}` : '');
+    if (this.betting && this.panel !== 'tables' && !this.settlePending) this.betCtl.render(ctx, ui, [this.boxBets.length > 1 ? `main ${this.selBox + 1} sur ${this.boxBets.length} · total ${this.boxTotal}` : '', this.roundTips ? `Pourboires : ${this.roundTips}` : ''].filter(Boolean).join(' · '));
     if (this.panel === 'tables' || this.panel === 'tip') this.renderPanel(ctx, ui);
     if (this.panel === 'double') drawPill(ctx, 'Doubler : reçois ta carte face visible, ou face cachée (retournée à la fin)', a.x + a.w / 2, this.btn.dblUp.y - 18 * ui, 12 * ui, 'rgba(14,11,16,0.9)', LUXE.champagne);
     this.layer.render(ctx, ui);
@@ -527,6 +790,7 @@ export class BlackjackGame implements MiniGame {
 
   /** Récapitulatif de la manche : mises, retour, bonus, pourboires, solde avant → après. */
   private renderRecap(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, ui: number): void {
+    // (w est réduit quand le panneau se replie)
     const r = this.recap!;
     const net = r.payout - r.stake;
     const after = r.before - r.stake + r.payout - this.roundTips;
@@ -535,16 +799,37 @@ export class BlackjackGame implements MiniGame {
     const l2 = `Mise initiale ${fmt(r.initial)}${r.extra ? ` · suppl. ${fmt(r.extra)} (double/séparation)` : ''} · retour ${fmt(r.payout)}`;
     const l3 = r.natural ? `Paiement 3:2 : ${fmt(r.payout - r.bonus)} · bonus blackjack : +${fmt(r.bonus)} · total : ${fmt(r.payout)}` : r.dealerPeek ? 'Blackjack du croupier' : '';
     const l4 = `Solde ${fmt(r.before)} → ${fmt(after)}${this.roundTips ? ` (pourboires −${fmt(this.roundTips)})` : ''}`;
-    const l5 = r.hands.length > 1 ? r.hands.map((h, i) => `Main ${i + 1} : ${OUTCOME_LABEL[h.outcome as keyof typeof OUTCOME_LABEL] ?? h.outcome} (${h.net >= 0 ? '+' : '−'}${fmt(Math.abs(h.net))})`).join(' · ') : '';
-    const lines = [l2, l3, l5, l4].filter(Boolean);
-    const lh = 15 * ui, h = 30 * ui + lines.length * lh + 10 * ui;
+    // Une ligne par main (mise totale, résultat, gain ou perte nette), puis le bilan global
+    const sign = (v: number) => (v > 0 ? `+${fmt(v)}` : v < 0 ? `−${fmt(-v)}` : '±0');
+    // Lignes disponibles sur le tapis (titre, bilan total et solde compris) ; si les mains n'y tiennent pas une par
+    // ligne, elles sont regroupées deux par ligne (format court) avant tout raccourci « … et N autres »
+    const multi = r.hands.length > 1;
+    const fixed = [multi ? '' : l2, l3, multi ? 'x' : '', l4].filter(Boolean).length;
+    const maxRows = Math.max(1, Math.floor((this.felt.h - 46 * ui) / (15 * ui)) - fixed);
+    let handRows = multi ? r.hands.map((h) => `${h.label} : mise ${fmt(h.stake)} · ${h.outcome} · ${sign(h.net)}`) : [];
+    if (handRows.length > maxRows) {
+      const short = r.hands.map((h) => `${h.label} ${fmt(h.stake)} → ${sign(h.net)}`);
+      handRows = [];
+      for (let i = 0; i < short.length; i += 2) handRows.push(short.slice(i, i + 2).join('   ·   '));
+    }
+    const shownRows = handRows.length > maxRows ? [...handRows.slice(0, maxRows - 1), `… et ${handRows.length - maxRows + 1} autre(s) ligne(s)`] : handRows;
+    const l5 = r.hands.length > 1 ? `Total misé ${fmt(r.stake)} · retourné ${fmt(r.payout)} · bilan net ${sign(net)}` : '';
+    const hold = 3.2 + Math.min(6, handRows.length * 0.9);
+    const folded = this.t - this.recapAt > hold;
+    const fold = Math.min(1, Math.max(0, (this.t - this.recapAt - hold) / 0.35));
+    const lines = folded ? [] : [multi ? '' : l2, l3, ...shownRows, l5, l4].filter(Boolean);
+    const lh = 15 * ui, h = folded ? 30 * ui : 30 * ui + lines.length * lh + 10 * ui;
+    if (folded) w = Math.min(w, (300 + 100 * (1 - fold)) * ui);
+    // Le panneau reste dans le tapis
+    const F = this.felt;
+    cy = Math.max(F.y + h / 2 + 2 * ui, Math.min(F.y + F.h - h / 2 - 2 * ui, cy));
     ctx.save();
     roundRect(ctx, cx - w / 2, cy - h / 2, w, h, 12 * ui);
     ctx.fillStyle = 'rgba(14,11,16,0.96)'; ctx.fill();
     ctx.strokeStyle = r.natural ? LUXE.champagne : net > 0 ? PAL.success : net < 0 ? 'rgba(239,220,174,0.35)' : 'rgba(239,220,174,0.5)'; ctx.lineWidth = 1.4; ctx.stroke();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = font(15 * ui, 800); ctx.fillStyle = r.natural ? LUXE.champagne : net > 0 ? PAL.success : net < 0 ? PAL.danger : PAL.text;
-    ctx.fillText(title, cx, cy - h / 2 + 17 * ui, w - 16 * ui);
+    ctx.fillText(title, cx, folded ? cy : cy - h / 2 + 17 * ui, w - 16 * ui);
     ctx.font = font(11.5 * ui, 600); ctx.fillStyle = PAL.textDim;
     lines.forEach((l, i) => { ctx.fillStyle = l === l4 ? PAL.text : PAL.textDim; ctx.fillText(l, cx, cy - h / 2 + 36 * ui + i * lh, w - 16 * ui); });
     ctx.restore();

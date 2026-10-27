@@ -10,6 +10,12 @@ import { font } from './UIKit';
 
 interface Floater { text: string; color: string; t: number }
 interface CoinFx { x: number; y: number; vx: number; vy: number; t: number; spin: number; gain: boolean }
+/** Pièce ou jeton en vol vers le compteur (gain) : jaillit du point d'origine, puis file vers la pastille. */
+interface Token { ox: number; oy: number; bx: number; by: number; t: number; delay: number; dur: number; arrived: boolean; spin: number }
+interface Spark { x: number; y: number; vx: number; vy: number; t: number }
+/** Paliers d'intensité selon le montant gagné : petit (rapide), moyen, gros, très gros. */
+export function rewardTier(amount: number): 0 | 1 | 2 | 3 { return amount < 50 ? 0 : amount < 500 ? 1 : amount < 5000 ? 2 : 3; }
+const TIER_TOKENS = [4, 9, 16, 26];
 
 /** Solde de KSCoins animé (pastille noire, pièce, montant). */
 export class BalanceDisplay {
@@ -26,6 +32,48 @@ export class BalanceDisplay {
   onDelta: ((delta: number) => void) | null = null;
   /** Retient l'affichage d'un gain (ex. pendant qu'une roue tourne) : le compteur attend. */
   hold = false;
+  /**
+   * Point d'où partent les gains (écran) : le personnage dans le monde, le centre du jeu dans un mini-jeu.
+   * Sans origine (menu), animation simple sur la pastille.
+   */
+  home: { x: number; y: number } | null = null;
+  /** Effets réduits : moins de pièces en vol, pas d'éclat. */
+  lowFx = false;
+  /** Décalage vertical du bandeau (deux compteurs animés en même temps : KSCoins et jetons ne se chevauchent pas). */
+  bannerShift = 0;
+  /** Arrivée d'une pièce ou d'un jeton dans le compteur (son discret, vibration). */
+  onArrive: ((index: number, total: number) => void) | null = null;
+  private tokens: Token[] = [];
+  private sparks: Spark[] = [];
+  /** Vol en cours : le compteur avance au rythme des arrivées (de `from` à `to`, valeurs réelles de l'autorité). */
+  private flight: { from: number; to: number; total: number; arrived: number; tier: number } | null = null;
+  private banner: { text: string; sub: string; t: number; tier: number; x: number; y: number } | null = null;
+  private flash = 0;
+  private icon = { x: 0, y: 0 };
+
+  /** Termine immédiatement le vol en cours (nouveau mouvement de solde). */
+  private settleFlight(): void {
+    if (!this.flight) return;
+    this.shown = this.flight.to; this.flight = null; this.tokens = [];
+  }
+
+  /** Lance l'animation d'un gain réellement crédité (delta > 0). */
+  private startFlight(from: number, to: number): void {
+    const delta = to - from, tier = rewardTier(delta), h = this.home!;
+    const n = this.lowFx ? Math.min(6, TIER_TOKENS[tier]) : TIER_TOKENS[tier];
+    const stagger = Math.min(0.06, (tier >= 2 ? 0.9 : 0.5) / n);
+    this.flight = { from, to, total: n, arrived: 0, tier };
+    this.tokens = [];
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, r = 24 + Math.random() * (30 + tier * 18);
+      this.tokens.push({ ox: h.x, oy: h.y, bx: h.x + Math.cos(a) * r, by: h.y + Math.sin(a) * r * 0.7 - 10, t: 0, delay: i * stagger, dur: 0.55 + Math.random() * 0.2, arrived: false, spin: Math.random() * 6 });
+    }
+    if (tier >= 1) {
+      const unit = this.currency === 'chips' ? 'jetons' : 'KSCoins';
+      this.banner = { text: `${tier >= 3 ? 'GROS GAIN ! ' : ''}+${delta.toLocaleString('fr-FR')} ${unit}${this.currency === 'chips' ? ' crédités' : ''}`, sub: `Nouveau solde : ${to.toLocaleString('fr-FR')} ${unit}`, t: 0, tier, x: h.x, y: h.y };
+    }
+    this.flash = tier >= 2 && !this.lowFx ? 1 : 0;
+  }
 
   sync(b: number): void { this.shown = b; this.target = b; this.synced = true; }
 
@@ -33,7 +81,15 @@ export class BalanceDisplay {
     if (!this.synced) this.sync(balance);
     if (!this.hold && balance !== this.target) {
       const delta = balance - this.target;
+      this.settleFlight();
+      const from = this.target;
       this.target = balance;
+      // Gain avec une origine connue : les pièces volent vers le compteur, qui avance à chaque arrivée
+      if (delta > 0 && this.home) {
+        this.startFlight(from, balance);
+        this.onDelta?.(delta);
+        this.pulse = 0.4;
+      } else {
       this.pulse = 1; this.spin = 1;
       this.floaters.push({ text: `${delta > 0 ? '+' : '−'}${Math.abs(delta)}`, color: delta > 0 ? '#7dffb2' : '#ff9b9b', t: 0 });
       if (this.floaters.length > 3) this.floaters.shift();
@@ -44,8 +100,29 @@ export class BalanceDisplay {
         this.coins.push({ x: 0, y: 0, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t: 0, spin: Math.random() * 6, gain: delta > 0 });
       }
       this.onDelta?.(delta);
+      }
     }
-    if (this.shown !== this.target) {
+    // Vol des pièces / jetons : arrivées une à une, compteur proportionnel aux arrivées
+    if (this.flight) {
+      const f = this.flight;
+      for (const tk of this.tokens) {
+        if (tk.delay > 0) { tk.delay -= dt; continue; }
+        tk.t += dt; tk.spin += dt * 10;
+        if (!tk.arrived && tk.t >= tk.dur) {
+          tk.arrived = true; f.arrived++;
+          this.pulse = Math.min(1, this.pulse + 0.35); this.spin = 1;
+          if (!this.lowFx) for (let k = 0; k < 4; k++) { const a = Math.random() * Math.PI * 2; this.sparks.push({ x: this.icon.x, y: this.icon.y, vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, t: 0 }); }
+          this.onArrive?.(f.arrived, f.total);
+        }
+      }
+      this.tokens = this.tokens.filter((tk) => !tk.arrived);
+      this.shown = f.from + Math.round(((f.to - f.from) * f.arrived) / f.total);
+      if (f.arrived >= f.total) {
+        this.shown = f.to; this.flight = null;
+        this.floaters.push({ text: `+${(f.to - f.from).toLocaleString('fr-FR')}`, color: '#7dffb2', t: 0 });
+        if (this.floaters.length > 3) this.floaters.shift();
+      }
+    } else if (this.shown !== this.target) {
       const diff = this.target - this.shown;
       const step = Math.sign(diff) * Math.max(1, Math.ceil(Math.abs(diff) * dt * 6));
       this.shown = Math.abs(step) >= Math.abs(diff) ? this.target : this.shown + step;
@@ -56,6 +133,67 @@ export class BalanceDisplay {
     this.floaters = this.floaters.filter((f) => f.t < 1.4);
     for (const c of this.coins) { c.t += dt; c.x += c.vx * dt; c.y += c.vy * dt; c.vy += (c.gain ? 140 : 260) * dt; c.spin += dt * 9; }
     this.coins = this.coins.filter((c) => c.t < 0.9);
+    for (const sp of this.sparks) { sp.t += dt; sp.x += sp.vx * dt; sp.y += sp.vy * dt; }
+    this.sparks = this.sparks.filter((sp) => sp.t < 0.4);
+    if (this.banner) { this.banner.t += dt; if (this.banner.t > 1.6 + this.banner.tier * 0.4) this.banner = null; }
+    this.flash = Math.max(0, this.flash - dt * 2.5);
+  }
+
+  /** Gain en cours d'animation (les jeux peuvent attendre pour enchaîner). */
+  get animating(): boolean { return !!this.flight; }
+
+  /** Pièces en vol, éclats, bandeau du montant : dessinés par-dessus le jeu, sans capter les touchers. */
+  private renderFlight(ctx: CanvasRenderingContext2D, h: number): void {
+    const ix = this.icon.x, iy = this.icon.y, chips = this.currency === 'chips';
+    // Éclat lumineux au point de départ (gros gains)
+    if (this.flash > 0 && this.home) {
+      const r = 60 + (1 - this.flash) * 120;
+      const g = ctx.createRadialGradient(this.home.x, this.home.y, 0, this.home.x, this.home.y, r);
+      g.addColorStop(0, `rgba(255,236,170,${0.45 * this.flash})`); g.addColorStop(1, 'rgba(255,236,170,0)');
+      ctx.fillStyle = g; ctx.fillRect(this.home.x - r, this.home.y - r, r * 2, r * 2);
+    }
+    for (const tk of this.tokens) {
+      if (tk.delay > 0) continue;
+      const k = Math.min(1, tk.t / tk.dur);
+      // 0–0,25 : jaillissement autour de l'origine ; ensuite : courbe vers le compteur, en accélérant
+      let x: number, y: number, sc = 1;
+      if (k < 0.25) { const e = 1 - (1 - k / 0.25) ** 2; x = tk.ox + (tk.bx - tk.ox) * e; y = tk.oy + (tk.by - tk.oy) * e; sc = 0.6 + e * 0.6; }
+      else {
+        const u = (k - 0.25) / 0.75, e = u * u;
+        const cx = (tk.bx + ix) / 2 + (tk.bx < ix ? -40 : 40), cy = Math.min(tk.by, iy) - 60;
+        x = (1 - e) ** 2 * tk.bx + 2 * (1 - e) * e * cx + e * e * ix; y = (1 - e) ** 2 * tk.by + 2 * (1 - e) * e * cy + e * e * iy;
+        sc = 1.2 - e * 0.5;
+      }
+      const r = h * 0.2 * sc;
+      ctx.globalAlpha = 0.25; // traînée
+      if (chips) drawChipTop(ctx, x, y + r * 0.6, r * 0.8, 100); else drawKSCoin(ctx, x, y + r * 0.6, r * 0.8, Math.cos(tk.spin));
+      ctx.globalAlpha = 1;
+      if (chips) drawChipTop(ctx, x, y, r, 100); else drawKSCoin(ctx, x, y, r, Math.cos(tk.spin));
+    }
+    for (const sp of this.sparks) {
+      ctx.globalAlpha = 1 - sp.t / 0.4; ctx.fillStyle = chips ? '#bff7f3' : '#fff1c7';
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // Bandeau du montant gagné (gains moyens et plus) : apparaît en « pop », puis s'efface
+    const b = this.banner;
+    if (b) {
+      const life = 1.6 + b.tier * 0.4, k = b.t / life;
+      const pop = b.t < 0.18 ? 0.6 + (b.t / 0.18) * 0.5 : b.t < 0.3 ? 1.1 - ((b.t - 0.18) / 0.12) * 0.1 : 1;
+      ctx.save();
+      ctx.globalAlpha = k > 0.75 ? Math.max(0, 1 - (k - 0.75) / 0.25) : 1;
+      ctx.translate(b.x, b.y - h * 2.2 + this.bannerShift * h * 2.4 - b.t * 12); ctx.scale(pop, pop);
+      const size = h * (0.55 + b.tier * 0.12);
+      ctx.font = font(size, 900); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(b.text).width + size * 1.4;
+      roundRect(ctx, -tw / 2, -size * 0.85, tw, size * 1.7, size * 0.85);
+      ctx.fillStyle = 'rgba(11,10,13,0.88)'; ctx.fill();
+      ctx.strokeStyle = chips ? 'rgba(31,199,193,0.85)' : 'rgba(212,175,90,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = b.tier >= 2 ? goldGradient(ctx, 0, -size / 2, 0, size / 2) : LUXE.champagne;
+      ctx.fillText(b.text, 0, 1);
+      if (!this.flight) { ctx.font = font(size * 0.5, 700); ctx.fillStyle = PAL.text; ctx.fillText(b.sub, 0, size * 1.35); }
+      ctx.restore();
+    }
   }
 
   /** Dessine la pastille ; renvoie sa largeur. */
@@ -71,6 +209,7 @@ export class BalanceDisplay {
     ctx.strokeStyle = this.pulse > 0 ? `rgba(239,220,174,${0.5 + this.pulse * 0.5})` : 'rgba(212,175,90,0.6)';
     ctx.lineWidth = 1.3 + this.pulse * 1.8; ctx.stroke();
     const cx = x + h / 2 + 2 * ui, cy = y + h / 2;
+    this.icon = { x: cx, y: cy };
     if (this.currency === 'chips') drawChipTop(ctx, cx, cy, h * 0.36 * (1 + this.pulse * 0.15), 100);
     else drawKSCoin(ctx, cx, cy, h * 0.36 * (1 + this.pulse * 0.15), this.spin > 0 ? Math.cos(this.spin * Math.PI * 4) : 1);
     ctx.fillStyle = PAL.text; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
@@ -81,6 +220,8 @@ export class BalanceDisplay {
       if (this.currency === 'chips') drawChipTop(ctx, cx + c.x, cy + c.y, h * 0.16, 100); else drawKSCoin(ctx, cx + c.x, cy + c.y, h * 0.16, Math.cos(c.spin));
     }
     ctx.globalAlpha = 1;
+    // Gains en vol vers le compteur
+    if (this.tokens.length || this.sparks.length || this.banner || this.flash > 0) this.renderFlight(ctx, h);
     // Montants flottants
     for (const f of this.floaters) {
       const k = f.t / 1.4;

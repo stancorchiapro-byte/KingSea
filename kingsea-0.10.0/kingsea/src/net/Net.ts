@@ -54,7 +54,7 @@ export class Connection {
   lastError: string | null = null;
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
-  private pending = new Map<string, { req: AuthRequest; res: (r: AuthReply) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<string, { msg: ClientMsg; res: (r: AuthReply) => void; timer: ReturnType<typeof setTimeout> }>();
   private retry = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -63,6 +63,14 @@ export class Connection {
   private pingAt = 0;
   /** Appelé après une reconnexion réussie (pour rejoindre l'étage, renvoyer l'apparence…). */
   onReconnected: (() => void) | null = null;
+  /**
+   * Réponse arrivée après l'abandon de l'attente (délai dépassé) : l'opération a pu être appliquée par le serveur.
+   * Les soldes renvoyés permettent de réaligner l'affichage sur les données réellement enregistrées.
+   */
+  onLateReply: ((r: AuthReply) => void) | null = null;
+  /** Tentatives de reconnexion depuis la coupure, et heure (ms) du prochain essai. */
+  attempts = 0;
+  nextRetryAt = 0;
 
   constructor(readonly url: string) {}
 
@@ -107,11 +115,11 @@ export class Connection {
     store.set('kingsea.lastName', m.profile.name);
     this.profile = m.profile;
     const wasReconnecting = this.state === 'reconnecting';
-    this.state = 'online'; this.retry = 0;
+    this.state = 'online'; this.retry = 0; this.attempts = 0; this.nextRetryAt = 0;
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => { this.pingAt = performance.now(); this.raw({ t: 'ping' }); }, 10_000);
     // Requêtes restées sans réponse pendant la coupure : renvoyées (même identifiant → jamais rejouées)
-    for (const p of this.pending.values()) this.raw({ t: 'req', req: p.req });
+    for (const p of this.pending.values()) this.raw(p.msg);
     if (wasReconnecting) this.onReconnected?.();
   }
 
@@ -120,6 +128,7 @@ export class Connection {
     if (m.t === 'res') {
       const p = this.pending.get(m.id);
       if (p) { clearTimeout(p.timer); this.pending.delete(m.id); p.res(m.reply); }
+      else { console.warn('[KingSea] réponse tardive du serveur, soldes réalignés'); this.onLateReply?.(m.reply); }
     }
     if (m.t === 'auth' || m.t === 'authError') {
       const w = this.authWaiter; this.authWaiter = null;
@@ -136,9 +145,25 @@ export class Connection {
     // Reconnexion automatique : 1 s, 2 s, 4 s, 8 s, puis toutes les 15 s
     this.state = 'reconnecting';
     const delay = Math.min(15_000, 1000 * 2 ** this.retry++);
+    this.attempts++; this.nextRetryAt = Date.now() + delay;
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => { void this.open(); }, delay);
+    this.retryTimer = setTimeout(() => {
+      void this.open().then((r) => {
+        // Jeton refusé (session expirée, mot de passe changé sur un autre appareil, compte supprimé) :
+        // sans cela, le jeu restait indéfiniment « Reconnexion… » avec une connexion ouverte mais non identifiée.
+        if (!r.ok && r.needAuth) this.sessionExpired();
+      });
+    }, delay);
     for (const l of this.listeners) l({ t: 'notice', msg: '__disconnected__' });
+  }
+
+  /** Session refusée par le serveur pendant une reconnexion : retour propre au menu, sans attente infinie. */
+  private sessionExpired(): void {
+    console.warn('[KingSea] session refusée par le serveur à la reconnexion');
+    store.set(TOKEN_KEY, null);
+    this.close();
+    this.failPending('Session expirée');
+    for (const l of this.listeners) { try { l({ t: 'kicked', msg: 'Ta session a expiré (connexion depuis un autre appareil ou mot de passe changé). Reconnecte-toi.' }); } catch (e) { console.error(e); } }
   }
 
   private failPending(msg: string): void {
@@ -199,10 +224,20 @@ export class Connection {
   /** Requête à l'autorité du serveur ; attend la réponse (renvoyée après reconnexion si besoin). */
   request(kind: AskKind, game: string, action: string, input?: unknown): Promise<AuthReply> {
     const req: AuthRequest = { kind, game, action, input, id: newRequestId() };
+    return this.call(req.id, { t: 'req', req });
+  }
+
+  /** Mise ou action à une table du casino (réponse attendue, renvoyée telle quelle après une coupure). */
+  table(kind: 'tableBet' | 'tableAct', payload: unknown): Promise<AuthReply> {
+    const id = newRequestId();
+    return this.call(id, kind === 'tableBet' ? { t: 'tableBet', id, bet: payload } : { t: 'tableAct', id, act: payload });
+  }
+
+  private call(id: string, msg: ClientMsg): Promise<AuthReply> {
     return new Promise((res) => {
-      const timer = setTimeout(() => { this.pending.delete(req.id); res({ ok: false, error: 'Le serveur ne répond pas', balance: this.profile?.wallet.balance ?? 0 }); }, 15_000);
-      this.pending.set(req.id, { req, res, timer });
-      if (this.state === 'online') this.raw({ t: 'req', req });
+      const timer = setTimeout(() => { this.pending.delete(id); res({ ok: false, error: 'Le serveur ne répond pas', balance: this.profile?.wallet.balance ?? 0 }); }, 15_000);
+      this.pending.set(id, { msg, res, timer });
+      if (this.state === 'online') this.raw(msg);
     });
   }
 }

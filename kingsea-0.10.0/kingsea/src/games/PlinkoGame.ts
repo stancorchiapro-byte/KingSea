@@ -3,7 +3,7 @@
 // avec une chute accélérée, des rebonds amortis, des picots qui s'allument au contact et une arrivée animée.
 // Plusieurs billes peuvent tomber en même temps (chacune est une mise distincte, réglée à part).
 import { drawKSCoin, goldGradient, LUXE } from '../art/brand';
-import { roundRect } from '../art/canvas';
+import { makeCanvas, roundRect } from '../art/canvas';
 import { PAL } from '../art/palette';
 import type { PointerHandler } from '../engine/Input';
 import { ButtonLayer, makeButton, type Button } from '../ui/UIKit';
@@ -21,6 +21,7 @@ interface Spark { x: number; y: number; vx: number; vy: number; t: number }
 
 export class PlinkoGame implements MiniGame {
   readonly id = 'plinko';
+  readonly tableGame = 'plinko';
   readonly title = 'Plinko';
   readonly bg: [string, string] = ['#1a0f1c', '#060407'];
   readonly currency = 'chips' as const;
@@ -36,6 +37,7 @@ export class PlinkoGame implements MiniGame {
   private slotFlash = new Map<number, number>();
   private pegHits = new Map<string, number>();
   private sparks: Spark[] = [];
+  private boardImg: { key: string; c: ReturnType<typeof makeCanvas> } | null = null;
   private message = 'Choisis ta mise et lâche la bille.';
   private board = { cx: 0, top: 0, dx: 0, dy: 0 };
   private dropBtn!: Button;
@@ -59,9 +61,9 @@ export class PlinkoGame implements MiniGame {
   layout(): void {
     const a = this.host.area, ui = this.host.vp.ui, ctrlH = this.betCtl.layout(a, ui, [[this.dropBtn, 200]]);
     const portrait = a.h > a.w, bh = Math.max(44, 40 * ui); // cible tactile ≥ 44 px
-    const h = a.h - ctrlH - 30 * ui - (portrait ? bh + 26 * ui : 0);
+    const h = a.h - ctrlH - 30 * ui - (portrait ? bh + 26 * ui + 34 * ui : 0);
     const dy = h / (PLINKO_ROWS + 1.6), dx = Math.min(dy * 1.9, (a.w * 0.66) / (PLINKO_ROWS + 1));
-    this.board = { cx: a.x + a.w / 2, top: a.y + 12 * ui, dx, dy };
+    this.board = { cx: a.x + a.w / 2, top: a.y + (portrait ? 46 : 12) * ui, dx, dy };   // portrait : bande de message au-dessus
     // Boutons de risque : colonne à droite (paysage) ou ligne au-dessus des mises (portrait)
     const bw = Math.min(110 * ui, a.w * 0.26);
     this.riskBtns.forEach((b, i) => Object.assign(b, portrait
@@ -129,7 +131,7 @@ export class PlinkoGame implements MiniGame {
       if (p.row !== before && before < PLINKO_ROWS) {
         let col = 0; for (let k = 0; k < before; k++) col += b.path[k];
         this.pegHits.set(`${before + 1}:${col + b.path[before]}`, 0.35);
-        s.audio.tick();
+        s.audio.plink(before);
       }
       const total = b.steps.reduce((x, y) => x + y, 0);
       if (b.landed < 0 && b.t >= total + 0.25) {
@@ -140,11 +142,13 @@ export class PlinkoGame implements MiniGame {
         this.history.unshift(m); this.history = this.history.slice(0, 8);
         const net = b.win - b.bet;
         this.message = `×${fmtM(m)} · mise ${b.bet} → ${b.win} jetons (${net >= 0 ? '+' : '−'}${Math.abs(net)})`;
+        if (b.win >= b.bet * 3) this.host.celebrate(b.win - b.bet, b.bet, `×${fmtM(m)}`);
         if (b.win > b.bet) {
-          s.audio.win();
+          if (b.win < b.bet * 3) s.audio.win();
           const B = this.board, x = B.cx + (slot - PLINKO_ROWS / 2) * B.dx, y = B.top + PLINKO_ROWS * B.dy + B.dy * 0.6;
           for (let i = 0; i < 12; i++) this.sparks.push({ x, y, vx: (Math.random() - 0.5) * 160, vy: -120 - Math.random() * 140, t: 0 });
         } else if (b.win < b.bet) s.audio.lose();
+        else s.audio.push();
       }
     }
     this.balls = this.balls.filter((b) => b.landed < 0 || b.t < b.steps.reduce((x, y) => x + y, 0) + 0.55);
@@ -157,22 +161,36 @@ export class PlinkoGame implements MiniGame {
 
   render(ctx: CanvasRenderingContext2D): void {
     const ui = this.host.vp.ui, B = this.board;
-    // Plateau laqué en triangle, liseré doré
+    // Plateau laqué en triangle et picots dorés : pré-rendus (78 picots à dégradé coûtaient cher à chaque image)
     const topY = B.top - B.dy * 0.9, botY = B.top + PLINKO_ROWS * B.dy + B.dy * 1.25, half = (PLINKO_ROWS / 2 + 1.1) * B.dx;
-    ctx.save();
-    ctx.beginPath(); ctx.moveTo(B.cx - B.dx * 1.2, topY); ctx.lineTo(B.cx + B.dx * 1.2, topY); ctx.lineTo(B.cx + half, botY); ctx.lineTo(B.cx - half, botY); ctx.closePath();
-    const bg = ctx.createLinearGradient(0, topY, 0, botY); bg.addColorStop(0, 'rgba(40,30,44,0.9)'); bg.addColorStop(1, 'rgba(14,10,16,0.95)');
-    ctx.fillStyle = bg; ctx.fill(); ctx.strokeStyle = goldGradient(ctx, B.cx - half, topY, B.cx + half, botY); ctx.lineWidth = 2; ctx.stroke();
-    ctx.restore();
-    // Picots dorés (ceux qui viennent d'être touchés s'illuminent)
     const pr = Math.max(2, B.dx * 0.09);
-    for (let r = 1; r <= PLINKO_ROWS; r++) for (let k = 0; k <= r; k++) {
-      const p = this.pegPos(r, k), y = p.y - B.dy * 0.42;
-      const hit = this.pegHits.get(`${r}:${k}`) ?? 0;
-      if (hit > 0) { ctx.fillStyle = `rgba(255,236,170,${hit * 1.6})`; ctx.beginPath(); ctx.arc(p.x, y, pr * (2 + hit * 4), 0, Math.PI * 2); ctx.fill(); }
-      const g = ctx.createRadialGradient(p.x - pr * 0.4, y - pr * 0.4, 0.5, p.x, y, pr * 1.2);
-      g.addColorStop(0, '#fff6d8'); g.addColorStop(0.5, LUXE.gold); g.addColorStop(1, LUXE.goldDark);
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, y, pr, 0, Math.PI * 2); ctx.fill();
+    const dpr = Math.max(1, Math.abs(ctx.getTransform().a));
+    const bx0 = B.cx - half - 4, by0 = topY - 4, bw = half * 2 + 8, bh = botY - topY + 8;
+    const key = `${B.cx},${B.top},${B.dx},${B.dy}@${dpr}`;
+    if (this.boardImg?.key !== key) {
+      const c = makeCanvas(Math.ceil(bw * dpr), Math.ceil(bh * dpr)), g = c.ctx;
+      g.scale(dpr, dpr); g.translate(-bx0, -by0);
+      g.beginPath(); g.moveTo(B.cx - B.dx * 1.2, topY); g.lineTo(B.cx + B.dx * 1.2, topY); g.lineTo(B.cx + half, botY); g.lineTo(B.cx - half, botY); g.closePath();
+      const bg = g.createLinearGradient(0, topY, 0, botY); bg.addColorStop(0, 'rgba(40,30,44,0.92)'); bg.addColorStop(1, 'rgba(14,10,16,0.96)');
+      g.fillStyle = bg; g.fill(); g.strokeStyle = goldGradient(g, B.cx - half, topY, B.cx + half, botY); g.lineWidth = 2; g.stroke();
+      // Reflet de vitre en diagonale
+      g.save(); g.clip();
+      const gl = g.createLinearGradient(B.cx - half, topY, B.cx + half * 0.2, botY); gl.addColorStop(0, 'rgba(255,255,255,0.08)'); gl.addColorStop(0.5, 'rgba(255,255,255,0)');
+      g.fillStyle = gl; g.fillRect(bx0, by0, bw, bh); g.restore();
+      for (let r = 1; r <= PLINKO_ROWS; r++) for (let k = 0; k <= r; k++) {
+        const p = this.pegPos(r, k), y = p.y - B.dy * 0.42;
+        g.fillStyle = 'rgba(0,0,0,0.35)'; g.beginPath(); g.arc(p.x + pr * 0.3, y + pr * 0.5, pr, 0, Math.PI * 2); g.fill();
+        const pg = g.createRadialGradient(p.x - pr * 0.4, y - pr * 0.4, 0.5, p.x, y, pr * 1.2);
+        pg.addColorStop(0, '#fff6d8'); pg.addColorStop(0.5, LUXE.gold); pg.addColorStop(1, LUXE.goldDark);
+        g.fillStyle = pg; g.beginPath(); g.arc(p.x, y, pr, 0, Math.PI * 2); g.fill();
+      }
+      this.boardImg = { key, c };
+    }
+    ctx.drawImage(this.boardImg.c.canvas as CanvasImageSource, bx0, by0, bw, bh);
+    // Picots qui viennent d'être touchés : halo lumineux
+    for (const [id, hit] of this.pegHits) {
+      const [r, k] = id.split(':').map(Number), p = this.pegPos(r, k), y = p.y - B.dy * 0.42;
+      ctx.fillStyle = `rgba(255,236,170,${Math.min(1, hit * 1.6)})`; ctx.beginPath(); ctx.arc(p.x, y, pr * (1.6 + hit * 4), 0, Math.PI * 2); ctx.fill();
     }
     // Cases : du champagne (×0,5) au bordeaux profond (×16)
     const y = B.top + PLINKO_ROWS * B.dy + B.dy * 0.25, w = B.dx * 0.9;
@@ -192,15 +210,21 @@ export class PlinkoGame implements MiniGame {
     for (const b of this.balls) {
       const p = this.ballPos(b), r = Math.max(4, B.dx * 0.24);
       b.trail.forEach((q, i) => { ctx.fillStyle = `rgba(255,120,170,${(i / b.trail.length) * 0.25})`; ctx.beginPath(); ctx.arc(q.x, q.y, r * (0.4 + i / b.trail.length * 0.5), 0, Math.PI * 2); ctx.fill(); });
+      ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(p.x + r * 0.25, p.y + r * 0.35, r, 0, Math.PI * 2); ctx.fill();
       const g = ctx.createRadialGradient(p.x - r * 0.35, p.y - r * 0.35, 1, p.x, p.y, r);
       g.addColorStop(0, '#ffffff'); g.addColorStop(0.5, '#ff7fb0'); g.addColorStop(1, '#a3174e');
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.beginPath(); ctx.arc(p.x - r * 0.35, p.y - r * 0.4, r * 0.22, 0, Math.PI * 2); ctx.fill();
     }
     for (const sp of this.sparks) { ctx.globalAlpha = 1 - sp.t / 0.8; drawKSCoin(ctx, sp.x, sp.y, 5 * ui, Math.cos(sp.t * 14)); }
     ctx.globalAlpha = 1;
     const a = this.host.area;
     this.history.forEach((m, i) => drawPill(ctx, `×${String(m).replace('.', ',')}`, a.x + 30 * ui, a.y + 14 * ui + i * 26 * ui, 11 * ui, m >= 1 ? 'rgba(89,227,167,0.3)' : 'rgba(255,107,107,0.25)', PAL.text));
-    if (this.message) drawPill(ctx, this.message, a.x + a.w - 120 * ui, a.y + 20 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.message) {
+      const portrait = a.h > a.w;
+      if (portrait) drawPill(ctx, this.message, a.x + a.w / 2 + 24 * ui, a.y + 20 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text, a.w - 64 * ui);
+      else drawPill(ctx, this.message, a.x + a.w - 120 * ui, a.y + 20 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text, 236 * ui);
+    }
     const rb = this.riskBtns[0];
     if (rb) drawLabel(ctx, 'Risque', a.h > a.w ? rb.x - 34 * ui : rb.x + rb.w / 2, a.h > a.w ? rb.y + rb.h / 2 : rb.y - 14 * ui, 12 * ui, PAL.textDim, 'center', 700);
     this.betCtl.render(ctx, ui);

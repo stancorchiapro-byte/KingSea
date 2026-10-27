@@ -2,7 +2,7 @@
 
 export const TILE = 32; // taille d'une tuile en unités monde
 
-export type ThemeId = 'hub' | 'engine' | 'casino' | 'arcade' | 'cabins' | 'rooftop' | 'cabinRoom';
+export type ThemeId = 'hub' | 'engine' | 'casino' | 'arcade' | 'cabins' | 'rooftop' | 'cabinRoom' | 'panorama';
 
 /**
  * Caractères de la grille.
@@ -34,7 +34,9 @@ export type PropKind =
   // Rooftop
   | 'transat' | 'parasol' | 'palm' | 'tikiBar' | 'snackStand' | 'cook' | 'slide' | 'djBooth' | 'dj' | 'speaker' | 'lifebuoy' | 'deckHouse'
   // Hall (mise à jour Stan) : boutique, écrans, aquarium, piano, coin photo
-  | 'shopRack' | 'infoScreen' | 'aquarium' | 'piano' | 'photoSpot' | 'telescope';
+  | 'shopRack' | 'infoScreen' | 'aquarium' | 'piano' | 'photoSpot' | 'telescope' | 'raceSim' | 'coralVase' | 'signpost'
+  // Refonte : serrurier (logements), pont Panorama
+  | 'locksmith' | 'panoramaWindow' | 'starMap' | 'loungeChair' | 'brassRail' | 'globe' | 'fountain' | 'steamVent' | 'noticeBoard';
 
 export interface InteractDef {
   /** Identifiant du gestionnaire (WorldScene) : 'elevator', 'bar', … */

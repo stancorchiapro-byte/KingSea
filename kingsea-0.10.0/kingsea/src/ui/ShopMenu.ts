@@ -61,7 +61,7 @@ export class ShopMenu extends Modal {
     CATS.forEach(([id, label], i) => out.push(makeButton({ id: `shop-${id}`, label, style: 'secondary', active: this.cat === id, fontSize: vp.isPortrait ? 12 : 14, x: C.x + i * (tw + gap), y: C.y + 30 * ui, w: tw, h: th,
       onTap: () => { this.cat = id; this.page = 0; this.note = ''; this.relayout(); } })));
     const filter = CATS.find((c) => c[0] === this.cat)![2];
-    const list = ITEMS.filter((d) => d.price > 0 && filter(d));
+    const list = ITEMS.filter((d) => d.price > 0 && !d.exclusive && d.type !== 'special' && filter(d));
     const top = C.y + 30 * ui + th + 10 * ui, pagerH = Math.max(40, 40 * ui), rh = Math.max(52, 58 * ui);
     const cols = vp.isPortrait ? 1 : 2, colW = (C.w - gap * (cols - 1)) / cols;
     const rowsPer = Math.max(1, Math.floor((C.y + C.h - top - pagerH - 18 * ui + gap) / (rh + gap)));

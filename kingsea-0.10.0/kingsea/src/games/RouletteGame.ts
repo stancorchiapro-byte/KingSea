@@ -1,7 +1,6 @@
 // Vue tactile de la roulette européenne : tapis de mises, roue animée, historique.
 import { PAL } from '../art/palette';
 import type { PointerHandler, PointerInfo } from '../engine/Input';
-import { easeOutCubic } from '../engine/math';
 import { ButtonLayer, makeButton, type Button } from '../ui/UIKit';
 import { betKey, colorOf, WHEEL_ORDER, type Bet, type BetKind } from './logic/roulette';
 import type { MiniGame, MiniGameHost } from './MiniGame';
@@ -9,6 +8,7 @@ import { drawChip, drawLabel, drawPill } from './widgets';
 import { BetControl, ChipFlights, Dealer } from './casinoKit';
 import { betWins, returnMultiplier } from './logic/roulette';
 import { goldGradient } from '../art/brand';
+import { makeCanvas, roundRect } from '../art/canvas';
 
 const TAU = Math.PI * 2;
 /** Jeton affiché pour un montant (plus grande valeur de jeton contenue). */
@@ -20,6 +20,7 @@ interface Cell { kind: BetKind; x: number; y: number; w: number; h: number; labe
 
 export class RouletteGame implements MiniGame {
   readonly id = 'roulette';
+  readonly tableGame = 'roulette';
   readonly title = 'Roulette';
   readonly bg: [string, string] = ['#0a1f3a', '#040c18'];
   readonly currency = 'chips' as const;
@@ -44,7 +45,13 @@ export class RouletteGame implements MiniGame {
   private onTable: Bet[] = [];
   private t = 0;
   private rot = 0;
-  private spin: { start: number; dur: number; from: number; to: number; result: number; stake: number; payout: number } | null = null;
+  private spin: { start: number; dur: number; rel0: number; relEnd: number; result: number; stake: number; payout: number; bounces: number[] } | null = null;
+  /** Roue pré-rendue (cuvette, cases, frettes, numéros) : tournée à chaque image au lieu d'être redessinée. */
+  private wheelImg: { key: string; c: ReturnType<typeof makeCanvas> } | null = null;
+  private lastBall = { a: -Math.PI / 2, r: 0.93 };
+  private nextBounce = 0;
+  /** Marqueur (« dolly ») posé par le croupier sur le numéro sorti. */
+  private dollyT = -10;
   private result: number | null = null;
   private history: number[] = [];
   private message = 'Pose tes jetons sur le tapis.';
@@ -104,6 +111,8 @@ export class RouletteGame implements MiniGame {
     const outside: Array<[BetKind, string, string?]> = [[{ type: 'low' }, '1-18'], [{ type: 'even' }, 'Pair'], [{ type: 'red' }, '◆', COLORS.red], [{ type: 'black' }, '◆', COLORS.black], [{ type: 'odd' }, 'Impair'], [{ type: 'high' }, '19-36']];
     outside.forEach(([k, l, c], i) => cells.push({ kind: k, x: boardX + cw * (1 + i * 2), y: boardY + ch * 4, w: cw * 2, h: ch, label: l, color: c }));
     this.cells = cells;
+    // Résultat affiché sur la roue (le tapis reste lisible : cases gagnantes illuminées)
+    this.host.result.anchorX = (this.wheel.cx - a.x) / a.w; this.host.result.anchorY = (this.wheel.cy - a.y) / a.h;
   }
 
   handlers(): PointerHandler[] { return [this.boardHandler, this.layer]; }
@@ -137,18 +146,20 @@ export class RouletteGame implements MiniGame {
     const bets = [...this.bets.values()].map((b) => ({ ...b }));
     // Le tirage est décidé par l'autorité (serveur en ligne) ; l'animation ne fait que l'afficher.
     this.waiting = true; this.message = 'Rien ne va plus…';
-    const r = await s.ask('casino', 'roulette', 'play', { bets });
+    const r = await this.host.playRound('roulette', 'play', { bets }, total, () => this.host.toasts.show('Mise acceptée : tirage commun à la fin du compte à rebours'));
     this.waiting = false;
     if (!r.ok) { this.message = ''; this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
     const result = r.view.result as number;
-    const dur = 4.2;
-    const idx = WHEEL_ORDER.indexOf(result);
-    const rotEnd = this.rot + 0.6 * dur;
-    const target = -Math.PI / 2 + idx * (TAU / 37) + rotEnd + TAU / 74;
-    const from = Math.random() * TAU;
-    let to = target; // la bille tourne en sens inverse de la roue, 5 tours au moins
-    while (to > from - TAU * 5) to -= TAU;
-    this.spin = { start: this.t, dur, from, to, result, stake: r.stake, payout: r.payout };
+    const dur = 5.2;
+    // La bille est suivie dans le repère de la roue : elle part en sens inverse, ralentit, rebondit sur
+    // les déflecteurs puis se loge exactement dans la case du numéro décidé par l'autorité.
+    const relEnd = pocketAngle(result);
+    const rel0 = relEnd + TAU * 9 + (((this.lastBall.a - this.rot - relEnd) % TAU) + TAU) % TAU;
+    const bounces = [0.6, 0.66, 0.71, 0.75, 0.79].map((b) => b + (Math.random() - 0.5) * 0.02);
+    this.spin = { start: this.t, dur, rel0, relEnd, result, stake: r.stake, payout: r.payout, bounces };
+    this.nextBounce = 0;
+    this.result = null;
+    s.audio.ballRoll(dur * 0.58);
     this.onTable = bets;
     this.dealer.play('deal', 1.2);
     this.lastBets = [...this.bets.values()].map((b) => ({ ...b }));
@@ -156,14 +167,15 @@ export class RouletteGame implements MiniGame {
   }
 
   private finish(): void {
-    const sp = this.spin!, s = this.host.s;
+    const sp = this.spin!;
     const ret = sp.payout, staked = sp.stake;
     this.result = sp.result;
     this.history.unshift(sp.result); this.history = this.history.slice(0, 12);
     const net = ret - staked;
     const col = { green: 'vert', red: 'rouge', black: 'noir' }[colorOf(sp.result)];
     this.message = `${sp.result} ${col} · ${net > 0 ? `gagné +${net}` : net === 0 ? 'mise rendue' : `perdu −${-net}`}`;
-    if (net > 0) s.audio.win(); else s.audio.lose();
+    this.host.celebrate(net, staked, `${sp.result} ${col}`);
+    this.dollyT = this.t;
     // Le croupier ramasse les mises perdantes et paie les gagnantes, case par case
     const ui = this.host.vp.ui, D = this.dealerPos, hand = this.dealer.hand(D.x, D.y, D.k);
     for (const b of this.onTable) {
@@ -184,7 +196,12 @@ export class RouletteGame implements MiniGame {
     this.dealer.update(dt);
     this.flights.update(dt);
     this.rot += 0.6 * dt;
-    if (this.spin && this.t - this.spin.start >= this.spin.dur) this.finish();
+    if (this.spin) {
+      const p = (this.t - this.spin.start) / this.spin.dur;
+      // Rebonds sur les déflecteurs : petits claquements synchronisés avec l'animation
+      while (this.nextBounce < this.spin.bounces.length && p >= this.spin.bounces[this.nextBounce]) { this.host.s.audio.ballRattle(1 - this.nextBounce * 0.17); this.nextBounce++; }
+      if (p >= 1) this.finish();
+    }
     this.betCtl.locked = !!this.spin || this.waiting;
     this.betCtl.engaged = this.staked;
     this.betCtl.sync();
@@ -194,50 +211,149 @@ export class RouletteGame implements MiniGame {
     this.btn.rebet.enabled = !this.spin && this.staked === 0 && this.lastBets.length > 0;
   }
 
-  render(ctx: CanvasRenderingContext2D): void {
-    const ui = this.host.vp.ui, W = this.wheel;
-    // Roue
-    ctx.save(); ctx.translate(W.cx, W.cy);
-    ctx.fillStyle = '#4a2a14'; ctx.beginPath(); ctx.arc(0, 0, W.r, 0, TAU); ctx.fill();
-    ctx.strokeStyle = goldGradient(ctx, -W.r, -W.r, W.r, W.r); ctx.lineWidth = Math.max(3, W.r * 0.05); ctx.stroke();
+  /** Position de la bille (angle écran, rayon relatif) : piste, ralentissement, rebonds, puis case. */
+  private ballPos(): { a: number; r: number } {
+    const seg = TAU / 37;
+    if (this.spin) {
+      const sp = this.spin, p = Math.min(1, (this.t - sp.start) / sp.dur);
+      return rouletteBall(p, sp.rel0, sp.relEnd, this.rot);
+    }
+    if (this.result !== null) {
+      const idx = WHEEL_ORDER.indexOf(this.result);
+      return { a: -Math.PI / 2 + idx * seg + this.rot + seg / 2, r: 0.62 };
+    }
+    return { a: -Math.PI / 2, r: 0.93 };
+  }
+
+  /** Plateau de la roue (cases rouges/noires/vertes, frettes dorées, numéros, cône) dessiné une seule fois. */
+  private wheelSprite(px: number) {
+    const key = String(px);
+    if (this.wheelImg?.key === key) return this.wheelImg.c;
+    const c = makeCanvas(Math.round(px * 0.86), Math.round(px * 0.86)), g = c.ctx, R = (px * 0.86) / 2;
+    g.translate(R, R);
     const seg = TAU / 37;
     for (let i = 0; i < 37; i++) {
-      const n = WHEEL_ORDER[i], a0 = -Math.PI / 2 + i * seg + this.rot;
-      ctx.fillStyle = COLORS[colorOf(n)];
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, W.r * 0.9, a0, a0 + seg); ctx.closePath(); ctx.fill();
-      ctx.save(); ctx.rotate(a0 + seg / 2); ctx.fillStyle = '#fff'; ctx.font = `700 ${Math.max(7, W.r * 0.075)}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.translate(W.r * 0.8, 0); ctx.rotate(Math.PI / 2); ctx.fillText(String(n), 0, 0); ctx.restore();
+      const n = WHEEL_ORDER[i], a0 = -Math.PI / 2 + i * seg;
+      const base = COLORS[colorOf(n)];
+      const gr = g.createRadialGradient(0, 0, R * 0.55, 0, 0, R);
+      gr.addColorStop(0, base); gr.addColorStop(0.85, base); gr.addColorStop(1, '#00000080');
+      g.fillStyle = gr;
+      g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, R, a0, a0 + seg); g.closePath(); g.fill();
+      // Frette (séparation dorée entre deux cases)
+      g.strokeStyle = 'rgba(232,200,120,0.9)'; g.lineWidth = Math.max(1, R * 0.012);
+      g.beginPath(); g.moveTo(Math.cos(a0) * R * 0.62, Math.sin(a0) * R * 0.62); g.lineTo(Math.cos(a0) * R, Math.sin(a0) * R); g.stroke();
+      g.save(); g.rotate(a0 + seg / 2); g.fillStyle = '#fff'; g.font = `700 ${Math.max(7, R * 0.085)}px system-ui, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.translate(R * 0.9, 0); g.rotate(Math.PI / 2); g.fillText(String(n), 0, 0); g.restore();
     }
-    ctx.fillStyle = '#2b1a0c'; ctx.beginPath(); ctx.arc(0, 0, W.r * 0.55, 0, TAU); ctx.fill();
-    ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.arc(0, 0, W.r * 0.12, 0, TAU); ctx.fill();
-    for (let i = 0; i < 4; i++) { ctx.save(); ctx.rotate(this.rot * 2 + (i * Math.PI) / 2); ctx.fillRect(-1.5, 0, 3, W.r * 0.45); ctx.restore(); }
-    // Bille
-    let ba: number, br: number;
-    if (this.spin) {
-      const p = Math.min(1, (this.t - this.spin.start) / this.spin.dur), e = easeOutCubic(p);
-      ba = this.spin.from + (this.spin.to - this.spin.from) * e;
-      br = W.r * (0.95 - 0.2 * Math.max(0, (p - 0.6) / 0.4));
-    } else if (this.result !== null) {
-      const idx = WHEEL_ORDER.indexOf(this.result);
-      ba = -Math.PI / 2 + idx * seg + this.rot + seg / 2; br = W.r * 0.75;
-    } else { ba = -Math.PI / 2; br = W.r * 0.95; }
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(Math.cos(ba) * br, Math.sin(ba) * br, Math.max(3, W.r * 0.045), 0, TAU); ctx.fill();
+    // Anneau des cases (creux où se loge la bille)
+    g.strokeStyle = 'rgba(232,200,120,0.85)'; g.lineWidth = Math.max(1, R * 0.015);
+    g.beginPath(); g.arc(0, 0, R * 0.8, 0, TAU); g.stroke();
+    g.beginPath(); g.arc(0, 0, R * 0.62, 0, TAU); g.stroke();
+    // Cône central en bois
+    const cone = g.createRadialGradient(-R * 0.15, -R * 0.15, R * 0.05, 0, 0, R * 0.62);
+    cone.addColorStop(0, '#8a5a30'); cone.addColorStop(1, '#2b1a0c');
+    g.fillStyle = cone; g.beginPath(); g.arc(0, 0, R * 0.61, 0, TAU); g.fill();
+    for (let i = 0; i < 8; i++) { g.strokeStyle = 'rgba(0,0,0,0.25)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos((i * TAU) / 8) * R * 0.6, Math.sin((i * TAU) / 8) * R * 0.6); g.stroke(); }
+    this.wheelImg = { key, c };
+    return c;
+  }
+
+  render(ctx: CanvasRenderingContext2D): void {
+    const ui = this.host.vp.ui, W = this.wheel;
+    // Roue : cuvette en bois verni, piste de bille, déflecteurs fixes, plateau pré-rendu qui tourne
+    const seg = TAU / 37;
+    const dpr = Math.max(1, Math.abs(ctx.getTransform().a));
+    const img = this.wheelSprite(Math.round(W.r * 2 * dpr));
+    ctx.save(); ctx.translate(W.cx, W.cy);
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 14 * ui; ctx.shadowOffsetY = 5 * ui;
+    const wood = ctx.createRadialGradient(-W.r * 0.3, -W.r * 0.3, W.r * 0.2, 0, 0, W.r);
+    wood.addColorStop(0, '#7a4a24'); wood.addColorStop(0.8, '#4a2a14'); wood.addColorStop(1, '#2a160a');
+    ctx.fillStyle = wood; ctx.beginPath(); ctx.arc(0, 0, W.r, 0, TAU); ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = goldGradient(ctx, -W.r, -W.r, W.r, W.r); ctx.lineWidth = Math.max(3, W.r * 0.04); ctx.stroke();
+    // Piste de la bille (bois clair poli)
+    const track = ctx.createRadialGradient(0, 0, W.r * 0.84, 0, 0, W.r * 0.97);
+    track.addColorStop(0, '#2a180c'); track.addColorStop(0.5, '#a87a48'); track.addColorStop(1, '#5a3418');
+    ctx.fillStyle = track; ctx.beginPath(); ctx.arc(0, 0, W.r * 0.97, 0, TAU); ctx.arc(0, 0, W.r * 0.86, 0, TAU, true); ctx.fill();
+    // Déflecteurs (losanges dorés fixes)
+    for (let i = 0; i < 8; i++) {
+      const a = (i * TAU) / 8 + seg / 2, rr = W.r * 0.875;
+      ctx.save(); ctx.rotate(a); ctx.translate(rr, 0);
+      ctx.fillStyle = goldGradient(ctx, -4, -4, 4, 4); ctx.beginPath(); ctx.moveTo(-W.r * 0.035, 0); ctx.lineTo(0, -W.r * 0.02); ctx.lineTo(W.r * 0.035, 0); ctx.lineTo(0, W.r * 0.02); ctx.fill();
+      ctx.restore();
+    }
+    ctx.save(); ctx.rotate(this.rot);
+    ctx.drawImage(img.canvas as CanvasImageSource, -W.r * 0.86, -W.r * 0.86, W.r * 1.72, W.r * 1.72);
+    // Tourelle centrale : croisillon doré qui tourne avec le plateau
+    for (let i = 0; i < 4; i++) {
+      ctx.save(); ctx.rotate((i * Math.PI) / 2);
+      ctx.fillStyle = goldGradient(ctx, 0, -2, W.r * 0.4, 2); ctx.fillRect(0, -W.r * 0.018, W.r * 0.36, W.r * 0.036);
+      ctx.beginPath(); ctx.arc(W.r * 0.36, 0, W.r * 0.035, 0, TAU); ctx.fill();
+      ctx.restore();
+    }
+    const hub = ctx.createRadialGradient(-W.r * 0.03, -W.r * 0.03, 1, 0, 0, W.r * 0.12);
+    hub.addColorStop(0, '#fff3c4'); hub.addColorStop(1, '#8a6a2b');
+    ctx.fillStyle = hub; ctx.beginPath(); ctx.arc(0, 0, W.r * 0.11, 0, TAU); ctx.fill();
+    ctx.restore();
+    // Bille : position calculée dans le repère de la roue
+    const b = this.ballPos();
+    this.lastBall = b;
+    const bx = Math.cos(b.a) * b.r * W.r, by = Math.sin(b.a) * b.r * W.r, brad = Math.max(3, W.r * 0.04);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(bx + brad * 0.3, by + brad * 0.4, brad, 0, TAU); ctx.fill();
+    const bg = ctx.createRadialGradient(bx - brad * 0.35, by - brad * 0.35, brad * 0.1, bx, by, brad);
+    bg.addColorStop(0, '#ffffff'); bg.addColorStop(1, '#bfc3c9');
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(bx, by, brad, 0, TAU); ctx.fill();
+    // Reflet de la lumière du plafond sur le vernis
+    const sheen = ctx.createLinearGradient(-W.r, -W.r, W.r * 0.2, W.r * 0.2);
+    sheen.addColorStop(0, 'rgba(255,255,255,0.14)'); sheen.addColorStop(0.5, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sheen; ctx.beginPath(); ctx.arc(0, 0, W.r, 0, TAU); ctx.fill();
     ctx.restore();
 
     // Historique
     const hy = W.cy + W.r + 18 * ui;
+    if (this.history.length) drawLabel(ctx, 'Derniers', W.cx - W.r, hy - 14 * ui, 9 * ui, PAL.textDim, 'left', 700);
     this.history.slice(0, 8).forEach((n, i) => drawPill(ctx, String(n), W.cx - W.r + 14 * ui + i * 26 * ui, hy, 10 * ui, COLORS[colorOf(n)], '#fff'));
 
-    // Tapis
+    // Tapis : feutre vert avec rail de cuir, cases cernées d'or, cases gagnantes illuminées
+    const c0 = this.cells[0], last = this.cells[this.cells.length - 1];
+    const bx0 = c0.x - 8 * ui, by0 = c0.y - 8 * ui, bx1 = this.cells.reduce((m, c) => Math.max(m, c.x + c.w), 0) + 8 * ui, by1 = last.y + last.h + 8 * ui;
+    roundRect(ctx, bx0, by0, bx1 - bx0, by1 - by0, 12 * ui);
+    ctx.fillStyle = '#2a160a'; ctx.fill();
+    const felt = ctx.createRadialGradient((bx0 + bx1) / 2, (by0 + by1) / 2, 10, (bx0 + bx1) / 2, (by0 + by1) / 2, (bx1 - bx0) * 0.6);
+    felt.addColorStop(0, '#13774f'); felt.addColorStop(1, '#0a4a31');
+    roundRect(ctx, bx0 + 4 * ui, by0 + 4 * ui, bx1 - bx0 - 8 * ui, by1 - by0 - 8 * ui, 9 * ui); ctx.fillStyle = felt; ctx.fill();
+    const settled = this.result !== null && !this.spin;
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 6);
     for (const c of this.cells) {
-      ctx.fillStyle = c.color ?? '#0d5e3e';
-      ctx.fillRect(c.x + 1, c.y + 1, c.w - 2, c.h - 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1; ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
-      const win = this.result !== null && c.kind.type === 'number' && c.kind.n === this.result;
-      if (win) { ctx.strokeStyle = PAL.gold; ctx.lineWidth = 3; ctx.strokeRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4); }
+      if (c.color) { ctx.fillStyle = c.color; ctx.fillRect(c.x + 1.5, c.y + 1.5, c.w - 3, c.h - 3); }
+      ctx.strokeStyle = 'rgba(239,220,174,0.7)'; ctx.lineWidth = 1; ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
+      const won = settled && betWins(c.kind, this.result!);
+      if (won) {
+        ctx.fillStyle = `rgba(255,214,120,${0.18 + 0.17 * pulse})`; ctx.fillRect(c.x + 1, c.y + 1, c.w - 2, c.h - 2);
+        ctx.strokeStyle = PAL.gold; ctx.lineWidth = 2.5; ctx.strokeRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4);
+      }
       drawLabel(ctx, c.label, c.x + c.w / 2, c.y + c.h / 2, Math.min(c.h * 0.42, c.w * 0.45, 15 * ui), '#fff', 'center', 800);
       const bet = this.bets.get(betKey(c.kind)) ?? this.onTable.find((b) => betKey(b.kind) === betKey(c.kind));
-      if (bet) drawChip(ctx, c.x + c.w / 2, c.y + c.h / 2, Math.min(c.w, c.h) * 0.38, chipFor(bet.amount));
+      if (bet) {
+        const cr = Math.min(c.w, c.h) * 0.38;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(c.x + c.w / 2 + 1, c.y + c.h / 2 + cr * 0.35, cr, cr * 0.45, 0, 0, TAU); ctx.fill();
+        drawChip(ctx, c.x + c.w / 2, c.y + c.h / 2, cr, chipFor(bet.amount));
+        if (bet.amount !== chipFor(bet.amount)) drawPill(ctx, String(bet.amount), c.x + c.w / 2, c.y + c.h / 2 + cr + 4 * ui, 8 * ui, 'rgba(0,0,0,0.75)', '#fff');
+      }
+    }
+    // Marqueur du numéro sorti : il descend sur la case, comme le pose le croupier
+    if (settled) {
+      const cell = this.cells.find((c) => c.kind.type === 'number' && c.kind.n === this.result);
+      if (cell) {
+        const k = Math.min(1, (this.t - this.dollyT) / 0.45), drop = (1 - k) * (1 - k) * 40 * ui;
+        const dx = cell.x + cell.w / 2, dy = cell.y + cell.h * 0.3 - drop, dr = Math.min(cell.w, cell.h) * 0.3;
+        ctx.globalAlpha = k;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(dx + 2, cell.y + cell.h * 0.3 + dr * 0.8, dr * 0.9, dr * 0.35, 0, 0, TAU); ctx.fill();
+        const dg = ctx.createLinearGradient(dx - dr, dy - dr, dx + dr, dy + dr); dg.addColorStop(0, '#ffffff'); dg.addColorStop(1, '#cfd6de');
+        ctx.fillStyle = dg; ctx.beginPath(); ctx.arc(dx, dy, dr, 0, TAU); ctx.fill();
+        ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.arc(dx, dy, dr * 0.45, 0, TAU); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
     }
     const D = this.dealerPos;
     this.dealer.render(ctx, D.x, D.y, D.k, ui);
@@ -248,3 +364,25 @@ export class RouletteGame implements MiniGame {
     this.layer.render(ctx, ui);
   }
 }
+
+/**
+ * Trajectoire de la bille dans le repère de la roue (p ∈ [0, 1] : avancement de l'animation, rot : angle de la roue).
+ * L'angle relatif part de rel0 et décroît (sens inverse de la roue) jusqu'à relEnd, centre de la case du numéro tiré,
+ * atteint à 85 % ; le rayon passe de la piste (0,93) aux cases (0,62) avec des rebonds amortis.
+ */
+export function rouletteBall(p: number, rel0: number, relEnd: number, rot: number): { a: number; r: number } {
+  const seg = TAU / 37;
+  const q = Math.min(1, p / 0.85), e = 1 - Math.pow(1 - q, 2.6);
+  let rel = rel0 + (relEnd - rel0) * e;
+  let r = 0.93;
+  if (p > 0.55) {
+    const d = Math.min(1, (p - 0.55) / 0.3);
+    const hop = Math.abs(Math.sin(d * Math.PI * 3.5)) * 0.07 * (1 - d);
+    r = 0.93 - 0.31 * d + hop;
+    rel += Math.sin(d * Math.PI * 5) * seg * 0.6 * (1 - d) * (1 - d);
+  }
+  return { a: rot + rel, r };
+}
+
+/** Centre (angle relatif à la roue) de la case d'un numéro. */
+export const pocketAngle = (n: number): number => -Math.PI / 2 + WHEEL_ORDER.indexOf(n) * (TAU / 37) + TAU / 74;

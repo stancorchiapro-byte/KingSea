@@ -145,7 +145,7 @@ export class SkeeBallGame implements MiniGame {
     drawPill(ctx, `Score ${this.score}`, a.x + 60 * ui, a.y + 20 * ui, 15 * ui, 'rgba(0,0,0,0.6)', PAL.goldLight);
     drawPill(ctx, `Boules ${this.left}`, a.x + 60 * ui, a.y + 50 * ui, 13 * ui, 'rgba(0,0,0,0.5)', PAL.text);
     this.throwsLog.forEach((v, i) => drawLabel(ctx, String(v), a.x + a.w - 24 * ui, a.y + 16 * ui + i * 18 * ui, 12 * ui, v >= 50 ? PAL.goldLight : PAL.textDim));
-    if (this.phase === 'ready') drawPill(ctx, 'Glisse la boule vers le haut : plus le geste est long, plus elle monte', L.cx, L.topY + 30 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.phase === 'ready') drawPill(ctx, 'Glisse la boule vers le haut : plus le geste est long, plus elle monte', L.cx, L.topY + 30 * ui, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text, this.host.area.w - 16 * ui);
     if (this.phase === 'ready' || this.phase === 'over') this.card.render(ctx, ui, this.phase === 'over');
     this.layer.render(ctx, ui);
   }

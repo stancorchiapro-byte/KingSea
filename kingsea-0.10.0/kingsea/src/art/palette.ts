@@ -64,6 +64,12 @@ export const THEMES: Record<string, Theme> = {
     wallTop: '#24496f', wallFace: '#9ec6e0', wallTrim: '#f4efe6', wallLow: '#a6774a', wallStyle: 'cabin',
   },
   // Rooftop : teck, pierre claire, blanc nacré, accents magenta pour la fête
+  // Pont Panorama : salon d'observation bleu nuit, parquet sombre, laiton et velours bordeaux
+  panorama: {
+    floorA: '#2c2420', floorB: '#251e1a', grout: '#1a1411',
+    carpet: '#4a1424', carpetEdge: '#e5b54a',
+    wallTop: '#0a1430', wallFace: '#13234a', wallTrim: '#e5b54a', wallLow: '#0d1938', wallStyle: 'luxe',
+  },
   rooftop: {
     floorA: '#eee8dc', floorB: '#e4ddcf', grout: '#cfc6b4',
     carpet: '#b07a45', carpetEdge: '#e5b54a',

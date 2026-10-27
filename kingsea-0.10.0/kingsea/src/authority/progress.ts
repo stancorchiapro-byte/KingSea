@@ -4,6 +4,8 @@
 // (identifiants de transaction) et plafonnées : impossible de « farmer » l'XP en répétant une action triviale.
 import { FURNITURE_BY_ID, STARTER_FURNITURE, STARTER_LAYOUT } from '../data/furniture';
 import { AuthError, ledger, type AuthEnv, type AuthState } from './types';
+import { chips as chipLedger } from './economy';
+import { PASS, passAddXp, type PassState } from './pass';
 
 // ---------------------------------------------------------------- état
 export interface ProgressState {
@@ -19,6 +21,8 @@ export interface ProgressState {
   /** Déblocages : 'furn:<id>', 'title:<nom>', 'badge:<nom>', 'hat:<id>', 'outfit:<id>', 'feature:<id>', 'style:<id>'. */
   unlocks: string[];
   title: string | null;
+  /** Passe de croisière gratuit (saison, XP de passe, paliers réclamés). */
+  pass?: PassState;
 }
 
 export interface MissionProgress { id: string; progress: number; distinct?: string[]; claimed: boolean }
@@ -53,7 +57,14 @@ export function normalizeProgress(raw: unknown): ProgressState {
     xpDay: typeof raw.xpDay === 'string' ? raw.xpDay : '', xpToday: int(raw.xpToday, 0), gameXpToday: games,
     discovered: strArr(raw.discovered), tried: strArr(raw.tried), unlocks: strArr(raw.unlocks, 500),
     title: typeof raw.title === 'string' ? raw.title : null,
+    pass: normalizePass(raw.pass),
   };
+}
+
+function normalizePass(raw: unknown): PassState {
+  if (!isObj(raw) || raw.season !== PASS.season) return { season: PASS.season, xp: 0, claimed: [] };
+  const claimed = Array.isArray(raw.claimed) ? [...new Set(raw.claimed.filter((x): x is number => Number.isInteger(x) && (x as number) >= 1 && (x as number) <= PASS.tiers.length))] : [];
+  return { season: PASS.season, xp: int(raw.xp, 0), claimed };
 }
 export function normalizeMissions(raw: unknown): MissionsState | undefined {
   if (!isObj(raw)) return undefined;
@@ -88,62 +99,92 @@ export function ensureProgress(s: AuthState): asserts s is AuthState & Required<
   if (h.missions && (!Array.isArray(h.missions.daily) || !Array.isArray(h.missions.weekly))) h.missions = normalizeMissions(h.missions);
 }
 
-// ---------------------------------------------------------------- niveaux
-export const MAX_LEVEL = 50;
-/** XP nécessaire pour passer du niveau L au niveau L+1 : 80 + 40 × L (niveau 10 en une semaine de jeu régulier). */
-export const xpToNext = (level: number): number => 80 + 40 * level;
-/** XP totale nécessaire pour atteindre le niveau L. */
+// ---------------------------------------------------------------- niveaux (sans limite)
+/** Aucun niveau maximal : la progression continue indéfiniment (les grands niveaux demandent beaucoup d'XP). */
+export const MAX_LEVEL = Number.POSITIVE_INFINITY;
+/** Garde-fou de calcul : niveau au-delà duquel on ne cherche plus (inatteignable en pratique : > 10¹² XP). */
+const LEVEL_SEARCH_CAP = 100_000;
+/**
+ * XP nécessaire pour passer du niveau L au niveau L+1.
+ * Jusqu'au niveau 10 : 80 + 40 × L (inchangé) ; ensuite + 3 × (L − 10)² : la courbe s'accentue sans devenir
+ * exponentielle (niveau 20 ≈ 1 180 XP par niveau, niveau 50 ≈ 6 900, niveau 100 ≈ 28 400).
+ */
+export const xpToNext = (level: number): number => 80 + 40 * level + 3 * Math.max(0, level - 10) ** 2;
+/** XP totale nécessaire pour atteindre le niveau L (forme close, exacte pour les entiers). */
 export function xpForLevel(level: number): number {
-  let t = 0;
-  for (let l = 1; l < Math.min(level, MAX_LEVEL); l++) t += xpToNext(l);
+  const L = Math.max(1, Math.min(Math.floor(level), LEVEL_SEARCH_CAP));
+  const n = L - 1; // somme de l = 1 à n
+  let t = 80 * n + 40 * (n * (n + 1)) / 2;
+  const m = Math.max(0, n - 10); // somme de 3 × k² pour k = 1..m
+  t += 3 * (m * (m + 1) * (2 * m + 1)) / 6;
   return t;
 }
 export function levelForXp(xp: number): number {
-  let l = 1;
-  while (l < MAX_LEVEL && xp >= xpForLevel(l + 1)) l++;
-  return l;
+  if (!Number.isFinite(xp) || xp <= 0) return 1;
+  // Recherche dichotomique (xpForLevel est croissante)
+  let lo = 1, hi = LEVEL_SEARCH_CAP;
+  while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (xpForLevel(mid) <= xp) lo = mid; else hi = mid - 1; }
+  return lo;
 }
 /** Progression vers le niveau suivant (pour la barre d'XP). */
 export function levelProgress(xp: number): { level: number; into: number; needed: number; ratio: number } {
   const level = levelForXp(xp);
-  if (level >= MAX_LEVEL) return { level, into: 0, needed: 0, ratio: 1 };
   const into = xp - xpForLevel(level), needed = xpToNext(level);
-  return { level, into, needed, ratio: into / needed };
+  return { level, into, needed, ratio: Math.max(0, Math.min(1, into / needed)) };
 }
 
-export interface LevelReward { coins?: number; unlocks?: string[] }
-/** Récompenses de niveau (au-delà de 10, les niveaux non listés rapportent 50 KSCoins). */
+export interface LevelReward { coins?: number; chips?: number; unlocks?: string[] }
 /** Niveau auquel une clé de déblocage est obtenue (null : pas une récompense de niveau). */
 export function unlockLevel(key: string): number | null {
   for (const [lv, r] of Object.entries(LEVEL_REWARDS)) if (r.unlocks?.includes(key)) return Number(lv);
   return null;
 }
 
+/**
+ * Paliers de récompenses. Au-delà, chaque niveau rapporte 50 KSCoins ; tous les 5 niveaux, 150 KSCoins et
+ * 100 jetons ; tous les 25 niveaux à partir de 50, un badge de prestige.
+ */
 export const LEVEL_REWARDS: Record<number, LevelReward> = {
   2: { coins: 100, unlocks: ['furn:lamp-deco', 'style:moderne'] },
-  3: { unlocks: ['title:Matelot', 'furn:plant-palm', 'style:minimaliste'] },
-  4: { coins: 150, unlocks: ['hat:hautdeforme'] },
-  5: { unlocks: ['feature:vip-lounge', 'badge:VIP', 'style:luxe'] },
-  6: { unlocks: ['furn:sofa-velvet'] },
+  3: { chips: 100, unlocks: ['title:Matelot', 'furn:plant-palm', 'style:minimaliste', 'emote:bow'] },
+  4: { coins: 150, unlocks: ['hat:hautdeforme', 'emote:salute'] },
+  5: { unlocks: ['feature:vip-lounge', 'badge:VIP', 'style:luxe', 'emote:sigh'] },
+  6: { chips: 150, unlocks: ['furn:sofa-velvet', 'emote:shrug'] },
   7: { coins: 200, unlocks: ['title:Habitué du casino'] },
-  8: { unlocks: ['furn:aquarium', 'style:futuriste'] },
-  9: { unlocks: ['outfit:smoking'] },
-  10: { coins: 300, unlocks: ['title:Officier', 'furn:piano'] },
-  12: { unlocks: ['furn:chandelier'] },
-  14: { unlocks: ['title:Capitaine de soirée'] },
-  15: { coins: 500, unlocks: ['furn:statue-gold'] },
-  20: { unlocks: ['title:Amiral', 'furn:yacht-model'] },
+  8: { unlocks: ['furn:aquarium', 'style:futuriste', 'emote:think'] },
+  9: { chips: 200, unlocks: ['outfit:smoking'] },
+  10: { coins: 300, unlocks: ['title:Officier', 'furn:piano', 'feature:panorama'] },
+  12: { unlocks: ['furn:chandelier', 'emote:spyglass'] },
+  14: { unlocks: ['title:Capitaine de soirée', 'hat:amiral'] },
+  15: { coins: 500, chips: 300, unlocks: ['furn:statue-gold', 'emote:stretch'] },
+  18: { unlocks: ['jewel:medaille'] },
+  20: { coins: 300, unlocks: ['title:Amiral', 'furn:yacht-model'] },
   25: { coins: 1000, unlocks: ['badge:Légende'] },
-  30: { unlocks: ['title:Légende des mers'] },
+  30: { chips: 500, unlocks: ['title:Légende des mers', 'hat:couronne'] },
+  40: { coins: 600, unlocks: ['title:Seigneur des océans'] },
+  50: { coins: 1000, chips: 1000, unlocks: ['title:Grand Amiral', 'badge:Prestige I'] },
 };
 export function rewardFor(level: number): LevelReward {
-  return LEVEL_REWARDS[level] ?? (level > 10 ? { coins: 50 } : {});
+  const fixed = LEVEL_REWARDS[level];
+  if (fixed) return fixed;
+  if (level <= 10) return {};
+  // Prestige : un badge tous les 25 niveaux à partir de 75 (Prestige II, III…)
+  if (level >= 75 && level % 25 === 0) return { coins: 1000, chips: 500, unlocks: [`badge:Prestige ${roman(level / 25 - 1)}`] };
+  if (level % 5 === 0) return { coins: 150, chips: 100 };
+  return { coins: 50 };
+}
+
+function roman(n: number): string {
+  const v: Array<[number, string]> = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
+  let out = '', k = Math.max(1, Math.floor(n));
+  for (const [x, r] of v) while (k >= x) { out += r; k -= x; }
+  return out;
 }
 
 /** Déblocages acquis par le seul niveau (pour l'affichage et les vérifications). */
 export function unlocksUpTo(level: number): string[] {
   const out: string[] = [];
-  for (let l = 2; l <= level; l++) out.push(...(rewardFor(l).unlocks ?? []));
+  for (let l = 2; l <= Math.min(level, LEVEL_SEARCH_CAP); l++) out.push(...(rewardFor(l).unlocks ?? []));
   return out;
 }
 
@@ -152,7 +193,7 @@ export function hasUnlock(s: AuthState, key: string): boolean {
   return !!p && p.unlocks.includes(key);
 }
 
-function unlock(s: AuthState & Required<ProgressHolder>, key: string): void {
+export function unlock(s: AuthState & Required<ProgressHolder>, key: string): void {
   if (!s.progress.unlocks.includes(key)) s.progress.unlocks.push(key);
   if (key.startsWith('furn:')) { const id = key.slice(5); s.room.owned[id] = Math.max(1, s.room.owned[id] ?? 0); }
 }
@@ -182,9 +223,12 @@ export function grantXp(s: AuthState, amountXp: number, env: AuthEnv, opts: { ca
   const before = p.level;
   p.xp += n;
   p.level = levelForXp(p.xp);
+  // L'XP alimente aussi le passe de croisière (mêmes plafonds anti-répétition)
+  passAddXp(p, n);
   for (let l = before + 1; l <= p.level; l++) {
     const reward = rewardFor(l);
     if (reward.coins) ledger.earn(s, reward.coins, `level:${l}`);
+    if (reward.chips && s.chips) chipLedger.earn(s, reward.chips, `level:${l}:jetons`);
     for (const u of reward.unlocks ?? []) unlock(s, u);
     out.levelUps.push({ level: l, reward });
     missionEvent(s, 'levelup', env);
@@ -193,7 +237,7 @@ export function grantXp(s: AuthState, amountXp: number, env: AuthEnv, opts: { ca
 }
 
 // ---------------------------------------------------------------- événements et découvertes
-export const PLACES = ['hub', 'casino', 'arcade', 'cabins', 'rooftop', 'engine', 'cabin-interior', 'vip-lounge'] as const;
+export const PLACES = ['hub', 'casino', 'arcade', 'cabins', 'rooftop', 'engine', 'cabin-interior', 'vip-lounge', 'panorama'] as const;
 export const DISCOVERY_XP = 50;
 export const FIRST_TRY_XP = 30;
 export const ROUND_XP = 10;

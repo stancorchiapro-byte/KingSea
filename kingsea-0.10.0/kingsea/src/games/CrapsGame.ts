@@ -18,6 +18,7 @@ const ZONES: Array<{ bet: CrapsBet; label: string; sub: string; color: string }>
 
 export class CrapsGame implements MiniGame {
   readonly id = 'craps';
+  readonly tableGame = 'craps';
   readonly title = 'Craps';
   readonly bg: [string, string] = ['#062a18', '#020c07'];
   readonly currency = 'chips' as const;
@@ -43,6 +44,11 @@ export class CrapsGame implements MiniGame {
   private dealerPos = { x: 0, y: 0, k: 1.2 };
   private zoneHandler: PointerHandler = { onDown: (p) => this.tapZone(p) };
   private dice = { cx: 0, cy: 0, s: 40 };
+  /** Piste des dés (zone où ils roulent) et trajectoires du lancer en cours. */
+  private pit = { x: 0, y: 0, w: 0, h: 0 };
+  private throwT = -1;
+  private paths: Array<{ sx: number; sy: number; wx: number; wy: number; ex: number; ey: number; spin: number; rest: number; hit: boolean; faces: number[] }> = [];
+  private static readonly THROW = 1.05;
   private t = 0;
 
   get holdBalance(): boolean { return this.phase === 'play' || this.waiting; }
@@ -74,7 +80,8 @@ export class CrapsGame implements MiniGame {
   layout(): void {
     const a = this.host.area, ui = this.host.vp.ui, ctrlH = this.betCtl.layout(a, ui, [[this.clearBtn, 96], [this.rebetBtn, 100], [this.rollBtn, 150]]);
     // Table de craps : zones imprimées sur le tapis à gauche, piste des dés et bâtonnier (croupier) à droite
-    this.table = { x: a.x, y: a.y + 4 * ui, w: a.w, h: a.h - ctrlH - 10 * ui };
+    const head = 34 * ui;   // place pour le buste du bâtonnier au-dessus du tapis (sans chevaucher l'en-tête)
+    this.table = { x: a.x, y: a.y + head, w: a.w, h: a.h - ctrlH - 6 * ui - head };
     const rail = 14 * ui, F = { x: this.table.x + rail, y: this.table.y + rail, w: this.table.w - rail * 2, h: this.table.h - rail * 2 };
     const portrait = a.h > a.w;
     const zw = portrait ? F.w - 16 * ui : F.w * 0.56, zh = portrait ? Math.min(78 * ui, (F.h * 0.55 - 24 * ui) / 3) : (F.h - 24 * ui) / 3;
@@ -83,6 +90,10 @@ export class CrapsGame implements MiniGame {
     const dh = portrait ? F.y + F.h - dy0 : F.h;
     this.dealerPos = { x: dx, y: dy0 + dh * 0.32, k: Math.max(1, Math.min(1.6, dh / 140)) };
     this.dice = { cx: dx, cy: dy0 + dh * 0.62, s: Math.min(56 * ui, (portrait ? F.w : F.w - zw) * 0.22, dh * 0.22) };
+    this.pit = portrait
+      ? { x: F.x + 10 * ui, y: dy0 + dh * 0.3, w: F.w - 20 * ui, h: dh * 0.62 }
+      : { x: F.x + zw + 22 * ui, y: F.y + dh * 0.3, w: F.w - zw - 32 * ui, h: dh * 0.62 };
+    this.host.result.anchorX = (dx - a.x) / a.w; this.host.result.anchorY = (this.dice.cy - a.y) / a.h - 0.06;
   }
 
   handlers(): PointerHandler[] { return [this.zoneHandler, this.layer]; }
@@ -107,39 +118,63 @@ export class CrapsGame implements MiniGame {
       // Tous les lancers de la manche sont tirés par l'autorité ; chaque toucher en révèle un.
       this.waiting = true;
       this.lastBets = { ...this.bets };
-      const r = await s.ask('casino', 'craps', 'play', { bets: { ...this.bets } });
+      const r = await this.host.playRound('craps', 'play', { bets: { ...this.bets } }, this.staked, () => this.host.toasts.show('Mise acceptée : tirage commun à la fin du compte à rebours'));
       this.waiting = false;
       if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
       this.settled = { stake: r.stake, payout: r.payout };
       this.round = r.view.round as CrapsRound; this.revealed = 0; this.phase = 'play';
     }
-    this.rolling = 0.8; this.dealer.play('deal', 0.8);
-    s.audio.roll();
+    this.rolling = CrapsGame.THROW; this.dealer.play('deal', 0.8);
+    this.startThrow();
+    s.audio.diceShake();
   }
 
   private afterRoll(): void {
-    const r = this.round!, s = this.host.s;
+    const r = this.round!;
     this.revealed++;
     const [a, b] = r.rolls[this.revealed - 1], sum = a + b;
     if (this.revealed === 1 && this.bets.field) this.message = `${sum} : Field ${fieldReturn(sum) > 0 ? 'gagnant' : 'perdant'}`;
     if (this.revealed < r.rolls.length) {
       this.message = this.revealed === 1 ? `Le point est ${r.point}. Relance pour le refaire avant un 7 !` : `${sum} · le point reste ${r.point}`;
-      s.audio.knock(0.5);
       return;
     }
     const ret = this.settled.payout, net = ret - this.settled.stake;
     const what = r.outcome === 'pass' ? (r.point ? `Point ${r.point} refait` : `${sum} : naturel`) : r.outcome === 'push12' ? '12 : Pass perd, Don’t Pass rendu' : r.point ? '7 avant le point' : `${sum} : craps`;
     this.message = `${what} · ${net > 0 ? `+${net}` : net === 0 ? 'mise rendue' : net} jetons`;
-    if (net > 0) s.audio.win(); else if (net < 0) s.audio.lose();
+    this.host.celebrate(net, this.settled.stake, what);
     this.dealer.play(net > 0 ? 'congrats' : net < 0 ? 'collect' : 'pay', 1.4);
     this.bets = {};
     this.phase = 'done';
   }
 
+  /** Prépare les trajectoires des deux dés (purement visuelles : les valeurs viennent de l'autorité). */
+  private startThrow(): void {
+    const P = this.pit, D = this.dice;
+    this.throwT = this.t;
+    this.paths = [0, 1].map((i) => {
+      const side = i === 0 ? -1 : 1;
+      const ex = D.cx + side * D.s * (0.55 + Math.random() * 0.35), ey = D.cy + (Math.random() - 0.5) * D.s * 0.5;
+      const faces = Array.from({ length: 6 }, () => 1 + Math.floor(Math.random() * 6));
+      return {
+        sx: P.x + P.w * (0.65 + i * 0.2), sy: P.y + P.h + D.s * 0.4,
+        wx: P.x + P.w * (0.35 + i * 0.25 + (Math.random() - 0.5) * 0.1), wy: P.y + D.s * 0.6,
+        ex: Math.max(P.x + D.s, Math.min(P.x + P.w - D.s, ex)), ey,
+        spin: (Math.random() < 0.5 ? -1 : 1) * (14 + Math.random() * 8), rest: (Math.random() - 0.5) * 0.5, hit: false, faces,
+      };
+    });
+  }
+
   update(dt: number): void {
     this.t += dt;
     this.dealer.update(dt);
-    if (this.rolling > 0) { this.rolling -= dt; if (this.rolling <= 0) { this.rolling = 0; this.afterRoll(); } }
+    if (this.rolling > 0) {
+      this.rolling -= dt;
+      // Choc contre la bande du fond, puis petits rebonds sur le tapis : sons synchronisés avec les trajectoires
+      const k = this.t - this.throwT;
+      for (const p of this.paths) if (!p.hit && k >= CrapsGame.THROW * 0.32) { p.hit = true; this.host.s.audio.diceHit(1); }
+      if (Math.floor(k / 0.13) !== Math.floor((k - dt) / 0.13) && k > CrapsGame.THROW * 0.4 && k < CrapsGame.THROW * 0.85) this.host.s.audio.diceHit(0.35);
+      if (this.rolling <= 0) { this.rolling = 0; this.afterRoll(); }
+    }
     this.betCtl.locked = this.phase === 'play';
     this.betCtl.engaged = this.staked;
     this.betCtl.sync();
@@ -152,7 +187,7 @@ export class CrapsGame implements MiniGame {
   render(ctx: CanvasRenderingContext2D): void {
     const ui = this.host.vp.ui, P = this.dealerPos;
     // Le bâtonnier derrière la piste des dés (dessiné avant la table : seul son buste dépasse)
-    this.dealer.render(ctx, P.x, Math.min(P.y, this.table.y + 2 * ui), P.k, ui);
+    this.dealer.render(ctx, P.x, this.table.y + 2 * ui, Math.min(P.k, 1.2), ui);
     drawTable(ctx, this.table, ui, 'green', 'rect');
     this.zones.forEach((z, i) => {
       const Z = ZONES[i];
@@ -163,17 +198,50 @@ export class CrapsGame implements MiniGame {
       const amt = this.bets[z.bet] ?? (this.phase === 'play' || this.rolling > 0 ? this.lastBets[z.bet] : undefined);
       if (amt) { drawChipStack(ctx, z.x + z.w - 26 * ui, z.y + z.h * 0.72, Math.min(z.h * 0.26, 15 * ui), amt, 6); drawLabel(ctx, String(amt), z.x + z.w - 50 * ui, z.y + z.h / 2, 12 * ui, LUXE.champagne, 'right'); }
     });
-    // Dés
+    // Piste des dés : bande du fond à pyramides (comme sur une vraie table de craps)
+    const Pt = this.pit;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(239,220,174,0.35)'; ctx.lineWidth = 1.2; ctx.setLineDash([6 * ui, 5 * ui]);
+    roundRect(ctx, Pt.x, Pt.y, Pt.w, Pt.h, 10 * ui); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    for (let x = Pt.x + 4 * ui; x < Pt.x + Pt.w - 8 * ui; x += 12 * ui) { ctx.beginPath(); ctx.moveTo(x, Pt.y + 2); ctx.lineTo(x + 6 * ui, Pt.y + 8 * ui); ctx.lineTo(x + 12 * ui, Pt.y + 2); ctx.fill(); }
+    ctx.restore();
+    // Dés : lancés depuis le bord du joueur, rebond sur la bande du fond, roulent puis s'immobilisent sur leur valeur
     const D = this.dice;
-    let v1 = 1, v2 = 1, a1 = 0, a2 = 0;
-    if (this.rolling > 0) { v1 = 1 + Math.floor((this.t * 17) % 6); v2 = 1 + Math.floor((this.t * 13 + 3) % 6); a1 = this.t * 9; a2 = -this.t * 7; }
-    else if (this.round && this.revealed > 0) [v1, v2] = this.round.rolls[this.revealed - 1];
-    const off = this.rolling > 0 ? Math.sin(this.t * 30) * 6 : 0;
-    drawDie(ctx, v1, D.cx - D.s * 0.65, D.cy + off, D.s, a1);
-    drawDie(ctx, v2, D.cx + D.s * 0.65, D.cy - off, D.s, a2);
+    const final = this.round && this.revealed > 0 ? this.round.rolls[this.revealed - 1] : [1, 1];
+    let v1 = final[0], v2 = final[1];
+    if (this.rolling > 0 && this.round) [v1, v2] = this.round.rolls[this.revealed];
+    for (let i = 0; i < 2; i++) {
+      const fv = i === 0 ? v1 : v2;
+      let x = D.cx + (i === 0 ? -1 : 1) * D.s * 0.65, y = D.cy, ang = i === 0 ? -0.15 : 0.2, val = fv, lift = 0;
+      const p = this.paths[i];
+      if (this.rolling > 0 && p) {
+        const k = Math.min(1, (this.t - this.throwT) / CrapsGame.THROW), hitK = 0.32;
+        if (k < hitK) {
+          const q = k / hitK;
+          x = p.sx + (p.wx - p.sx) * q; y = p.sy + (p.wy - p.sy) * q; lift = Math.sin(q * Math.PI) * 0.35;
+        } else {
+          const q = (k - hitK) / (1 - hitK), e = 1 - Math.pow(1 - q, 3);
+          x = p.wx + (p.ex - p.wx) * e; y = p.wy + (p.ey - p.wy) * e; lift = Math.abs(Math.sin(q * Math.PI * 3)) * 0.12 * (1 - q);
+        }
+        ang = p.rest + p.spin * (1 - k) * (1 - k);
+        // Faces qui défilent pendant la course, valeur définitive sur la fin
+        val = k > 0.82 ? fv : p.faces[Math.floor(k * 18) % p.faces.length];
+      } else if (p && this.revealed > 0) { x = p.ex; y = p.ey; ang = p.rest; }
+      const sz = D.s * (1 + lift);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.beginPath(); ctx.ellipse(x + 3, y + D.s * 0.55 + lift * D.s * 0.6, D.s * 0.5, D.s * 0.16, 0, 0, Math.PI * 2); ctx.fill();
+      drawDie(ctx, val, x, y - lift * D.s * 0.8, sz, ang);
+    }
+    // Palet ON/OFF du point (blanc sur le numéro du point, noir quand il n'y en a pas)
+    const puckOn = !!(this.round?.point && this.phase === 'play' && this.revealed > 0 && this.rolling === 0);
+    const px = Pt.x + Pt.w - 22 * ui, py = Pt.y + 22 * ui, pr = 15 * ui;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(px + 2, py + 3, pr, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = puckOn ? '#fbfaf7' : '#141218'; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = puckOn ? '#111827' : 'rgba(239,220,174,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+    drawLabel(ctx, puckOn ? 'ON' : 'OFF', px, py, 10 * ui, puckOn ? '#111827' : LUXE.ivory, 'center', 900);
     if (this.round?.point && this.phase === 'play' && this.revealed > 0) drawPill(ctx, `POINT ${this.round.point}`, D.cx, D.cy - D.s - 20 * ui, 14 * ui, '#fbfaf7', '#111827');
-    if (this.round && this.revealed > 0 && this.rolling === 0) drawLabel(ctx, `Total ${v1 + v2}`, D.cx, D.cy + D.s, 15 * ui, PAL.text);
-    if (this.message) drawPill(ctx, this.message, D.cx, D.cy + D.s + 34 * ui, 12 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.round && this.revealed > 0 && this.rolling === 0) drawPill(ctx, `Total ${v1 + v2}`, D.cx, D.cy + D.s + 6 * ui, 13 * ui, 'rgba(0,0,0,0.55)', LUXE.champagne);
+    if (this.message && !this.host.result.active) drawPill(ctx, this.message, D.cx, D.cy + D.s + 38 * ui, 12 * ui, 'rgba(14,11,16,0.9)', PAL.text, Pt.w + 40 * ui);
     this.betCtl.render(ctx, ui);
     this.layer.render(ctx, ui);
   }

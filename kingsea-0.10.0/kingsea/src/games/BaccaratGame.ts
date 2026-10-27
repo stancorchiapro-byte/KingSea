@@ -19,6 +19,7 @@ const CARD_TIME = 0.34;
 
 export class BaccaratGame implements MiniGame {
   readonly id = 'baccarat';
+  readonly tableGame = 'baccarat';
   readonly title = 'Baccarat';
   readonly bg: [string, string] = ['#1a0c10', '#060304'];
   readonly currency = 'chips' as const;
@@ -93,6 +94,8 @@ export class BaccaratGame implements MiniGame {
     const zh = Math.min(F.h * 0.38, 110 * ui), zy = F.y + F.h - zh - 8 * ui, zw = (F.w - 40 * ui) / 3;
     this.cardArea = { x: F.x, y: F.y, w: F.w, h: zy - F.y - 4 * ui };
     this.zones = ZONES.map((z, i) => ({ bet: z.bet, x: F.x + 10 * ui + i * (zw + 10 * ui), y: zy, w: zw, h: zh }));
+    // Résultat affiché entre les cartes et les zones de mise
+    this.host.result.anchorY = Math.max(0.1, (zy - 18 * ui - a.y) / a.h);
   }
 
   handlers(): PointerHandler[] { return [this.zoneHandler, this.layer]; }
@@ -115,7 +118,7 @@ export class BaccaratGame implements MiniGame {
     // Coup distribué par l'autorité (sabot de 8 jeux) avant l'affichage
     this.waiting = true;
     this.lastBets = { ...this.bets };
-    const r = await s.ask('casino', 'baccarat', 'play', { bets: { ...this.bets } });
+    const r = await this.host.playRound('baccarat', 'play', { bets: { ...this.bets } }, total, () => this.host.toasts.show('Mise acceptée : tirage commun à la fin du compte à rebours'));
     this.waiting = false;
     if (!r.ok) { this.host.toasts.show(r.error, 'error'); s.audio.error(); return; }
     const round = r.view as unknown as BacRound;
@@ -125,12 +128,13 @@ export class BaccaratGame implements MiniGame {
   }
 
   private finish(): void {
-    const s = this.host.s, r = this.round!;
+    const r = this.round!;
     const ret = this.settled.payout, net = ret - this.settled.stake;
     this.history.unshift(r.winner); this.history = this.history.slice(0, 14);
     const w = { player: 'Joueur', banker: 'Banque', tie: 'Égalité' }[r.winner];
     this.message = `${w} gagne (${bacTotal(r.player)} à ${bacTotal(r.banker)}) · ${net > 0 ? `+${net}` : net === 0 ? 'mise rendue' : `${net}`} jetons`;
-    if (net > 0) s.audio.win(); else if (net < 0) s.audio.lose();
+    const natural = r.player.length === 2 && r.banker.length === 2 && Math.max(bacTotal(r.player), bacTotal(r.banker)) >= 8;
+    this.host.celebrate(net, this.settled.stake, `${w} ${bacTotal(r.player)} à ${bacTotal(r.banker)}${natural ? ' · naturel' : ''}`);
     // Le croupier paie les zones gagnantes et ramasse les autres (égalité : Joueur et Banque rendus)
     const ui = this.host.vp.ui, d = this.dealer.hand(this.dealerPos.x, this.dealerPos.y, this.dealerPos.k);
     for (const z of this.zones) {
@@ -222,7 +226,7 @@ export class BaccaratGame implements MiniGame {
       ctx.beginPath(); ctx.arc(F.x + F.w - 14 * ui - i * 15 * ui, F.y + 12 * ui, 5.5 * ui, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = 'rgba(239,220,174,0.6)'; ctx.lineWidth = 1; ctx.stroke();
     });
-    if (this.message) drawPill(ctx, this.message, A.x + A.w / 2, A.y + A.h * 0.84, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
+    if (this.message && !this.host.result.active) drawPill(ctx, this.message, A.x + A.w / 2, A.y + A.h * 0.84, 13 * ui, 'rgba(14,11,16,0.9)', PAL.text);
     this.betCtl.render(ctx, ui);
     this.layer.render(ctx, ui);
   }

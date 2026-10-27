@@ -54,6 +54,10 @@ export const hubFloor: FloorDef = {
     { kind: 'column', tx: 22, ty: 6, w: 1, h: 1, solid: true },
     { kind: 'column', tx: 9, ty: 13, w: 1, h: 1, solid: true },
     { kind: 'column', tx: 22, ty: 13, w: 1, h: 1, solid: true },
+    // Vasques de coraux au pied des colonnes sud et totem d'orientation près du tapis
+    { kind: 'coralVase', tx: 8, ty: 13, w: 1, h: 1, solid: true },
+    { kind: 'coralVase', tx: 23, ty: 13, w: 1, h: 1, solid: true },
+    { kind: 'signpost', tx: 19, ty: 6, w: 1, h: 1, solid: true, hitbox: { x: 0.3, y: 0.5, w: 0.4, h: 0.5 } },
     { kind: 'plant', tx: 1, ty: 2, w: 1, h: 1, solid: true },
     { kind: 'plant', tx: 30, ty: 2, w: 1, h: 1, solid: true },
     { kind: 'plant', tx: 1, ty: 15, w: 1, h: 1, solid: true },
@@ -66,10 +70,12 @@ export const hubFloor: FloorDef = {
     { kind: 'aquarium', tx: 26, ty: 15, w: 3, h: 1, solid: true, interact: { id: 'aquarium', label: 'Aquarium', at: { x: 27.5, y: 14.5 }, radius: 1.8 } },
     // Piano à queue : on peut en jouer
     { kind: 'piano', tx: 10, ty: 3, w: 3, h: 1, solid: true, interact: { id: 'piano', label: 'Jouer du piano', at: { x: 11.5, y: 4.6 }, radius: 1.6 } },
-    // Écran d'information : heure, programme des étages, joueurs à bord
+    // Écran d'information : programme des étages, joueurs à bord
     { kind: 'infoScreen', tx: 20, ty: 2, w: 2, h: 1, solid: true, interact: { id: 'info-screen', label: 'Écran d’infos', at: { x: 21, y: 3.6 }, radius: 1.6 } },
     // Coin photo sous l'arche fleurie
     { kind: 'photoSpot', tx: 28, ty: 8, w: 2, h: 1, interact: { id: 'photo', label: 'Coin photo', at: { x: 29, y: 9.3 }, radius: 1.4 } },
+    // Fontaine de l'atrium (au centre du médaillon) : on peut y faire un vœu
+    { kind: 'fountain', tx: 15, ty: 9, w: 2, h: 2, solid: true, hitbox: { x: 0, y: 0.4, w: 2, h: 1.6 }, interact: { id: 'fountain', label: 'Faire un vœu', at: { x: 16, y: 11.6 }, radius: 1.5 } },
     // Passerelle d'embarquement (décor, fermée pendant la croisière)
     { kind: 'gangway', tx: 14, ty: 17, w: 4, h: 1 },
   ],

@@ -30,6 +30,7 @@ test('21 en trois cartes : pas un blackjack, payé 1:1 sans bonus', () => {
 test('blackjack contre blackjack du croupier : égalité, mise rendue, pas de bonus', () => {
   const g = rig([C(1), C(1), C(13), C(12)]);
   g.deal(10);
+  g.insure(0, false);
   assert.equal(g.hands[0].outcome, 'push');
   assert.equal(g.totalPayout, 10);
 });
@@ -140,4 +141,86 @@ test('autorité : pourboire au croupier — solde vérifié, montant prélevé u
   assert.equal(handle(s, q, env()).ok, false, 'même demande rejouée');
   assert.equal(s.chips!.balance, 15);
   assert.equal(s.stats['tips.total'], 15);
+});
+
+// ---------------------------------------------------------------- règles authentiques (refonte)
+test('distribution multi-places : une carte à chacun, croupier, puis seconde carte ; tours dans l’ordre des places', () => {
+  // places 0,1,2 puis croupier, puis secondes cartes
+  const g = rig([C(10), C(9), C(8), C(10), C(7), C(6), C(9), C(7)]);
+  g.deal([10, 20, 30]);
+  assert.equal(g.seats, 3);
+  assert.deepEqual(g.hands.map((h) => h.cards.map((c) => c.rank)), [[10, 7], [9, 6], [8, 9]]);
+  assert.deepEqual(g.dealer.map((c) => c.rank), [10, 7]);
+  assert.equal(g.activeSeat, 0);
+  g.stand(); assert.equal(g.activeSeat, 1);
+  g.stand(); assert.equal(g.activeSeat, 2);
+  g.stand();
+  assert.equal(g.phase, 'settled');
+  assert.deepEqual(g.hands.map((h) => h.outcome), ['push', 'lose', 'push']);
+  assert.equal(g.seatPayout(0), 10); assert.equal(g.seatPayout(1), 0); assert.equal(g.seatPayout(2), 30);
+});
+
+test('assurance : payée 2:1 si le croupier a un blackjack, perdue sinon', () => {
+  const win = rig([C(10), C(1), C(9), C(13)]); // joueur 10,9 ; croupier A,R
+  win.deal(20);
+  assert.equal(win.phase, 'insurance');
+  assert.ok(win.canInsure(0));
+  win.insure(0, true);
+  assert.equal(win.phase, 'settled');
+  assert.equal(win.insurance[0].amount, 10);
+  assert.equal(win.insurance[0].payout, 30, 'mise d’assurance + 2:1');
+  assert.equal(win.seatPayout(0), 30); assert.equal(win.seatStake(0), 30);
+  const lose = rig([C(10), C(1), C(9), C(6), C(10)]); // croupier A,6 : pas de blackjack
+  lose.deal(20);
+  lose.insure(0, true);
+  assert.equal(lose.phase, 'player');
+  assert.equal(lose.insurance[0].payout, 0);
+  lose.stand(); // 19 contre A,6,10 = 17
+  assert.equal(lose.hands[0].outcome, 'win');
+  assert.equal(lose.seatPayout(0), 40);
+  assert.equal(lose.seatStake(0), 30);
+});
+
+test('séparations multiples : jusqu’à 4 mains par place, double après séparation', () => {
+  // 8,8 contre 10,7 ; séparation 1 : 8♦ (main A), 8♣ (main B) ; séparation 2 (A) : 3, 2 ; séparation 3 (B) : 8, 9
+  const g = rig([C(8), C(10), C(8, '♥'), C(7), C(8, '♦'), C(8, '♣'), C(3), C(2), C(8, '♠'), C(9), C(10), C(10), C(10), C(10)]);
+  g.deal(10);
+  g.split(); assert.equal(g.hands.length, 2);
+  assert.ok(g.canSplit(), 'nouvelle paire : re-séparation');
+  g.split(); assert.equal(g.hands.length, 3);
+  assert.ok(!g.canSplit());
+  assert.ok(g.canDouble(), 'double après séparation autorisé');
+  g.stand(); g.stand();
+  assert.ok(g.canSplit(), 'troisième paire');
+  g.split(); assert.equal(g.hands.length, 4);
+  assert.equal(g.current!.cards[1].rank, 8, 'encore une paire…');
+  assert.ok(!g.canSplit(), '… mais 4 mains au plus');
+  assert.equal(g.totalStake, 40);
+  let guard = 10; while (g.phase === 'player' && guard--) g.stand();
+  assert.equal(g.phase, 'settled');
+  assert.equal(g.hands.filter((h) => h.seat === 0).length, 4);
+});
+
+test('As séparés : une carte chacun, pas de nouvelle séparation, 21 non naturel', () => {
+  const g = rig([C(1), C(9), C(1, '♥'), C(7), C(13), C(1, '♣'), C(10)]);
+  g.deal(10);
+  g.split();
+  assert.equal(g.phase, 'settled', 'les deux mains d’As sont servies d’une carte et closes');
+  assert.equal(g.hands[0].cards.length, 2); assert.equal(g.hands[1].cards.length, 2);
+  assert.notEqual(g.hands[0].outcome, 'blackjack', 'As + Roi après séparation : 21 ordinaire');
+  assert.equal(g.hands[0].outcome, 'win');
+});
+
+test('autorité : assurance prélevée une fois, séparations successives à identifiants distincts', () => {
+  const s = fresh();
+  stackShoe(s, 'blackjack', [C(8), C(1), C(8, '♥'), C(9), C(8, '♦'), C(5), C(10), C(10), C(10)]);
+  const r = handle(s, req('blackjack', 'deal', { bet: 20, table: 'debutant' }), env());
+  assert.ok(r.ok && r.view.phase === 'insurance');
+  const ins = handle(s, req('blackjack', 'act', { move: 'insurance', take: true }), env());
+  assert.ok(ins.ok); assert.equal(s.chips!.balance, 10_000 - 20 - 10);
+  assert.equal(handle(s, req('blackjack', 'act', { move: 'insurance', take: true }), env()).ok, false, 'une seule fois');
+  assert.ok(handle(s, req('blackjack', 'act', { move: 'split' }), env()).ok);
+  const r2 = handle(s, req('blackjack', 'act', { move: 'split' }), env());
+  assert.ok(r2.ok, 'deuxième séparation (identifiant distinct)');
+  assert.equal(s.chips!.balance, 10_000 - 20 - 10 - 20 - 20);
 });

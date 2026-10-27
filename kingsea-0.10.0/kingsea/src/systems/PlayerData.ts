@@ -28,7 +28,7 @@ export interface Settings {
 
 export type Appearance = Look;
 
-export interface PlayerData {
+export interface PlayerData extends EconomyHolder {
   version: number;
   playerId: string;
   name: string;
@@ -128,7 +128,7 @@ export function migrate(raw: unknown, now = Date.now()): PlayerData {
     missions: normalizeMissions(d.missions),
     room: d.room === undefined ? undefined : normalizeRoom(d.room),
     // Version 3 : jetons, inventaire et besoins ; valeurs sûres par défaut (rien d'existant n'est retiré)
-    ...(() => { const e: EconomyHolder = { chips: d.chips, inventory: d.inventory, needs: d.needs }; normalizeEconomy(e); return e; })(),
+    ...(() => { const e: EconomyHolder = { chips: d.chips, inventory: d.inventory, needs: d.needs, keys: d.keys, keyring: d.keyring, giftLog: d.giftLog }; normalizeEconomy(e); return e; })(),
     sessions: isObj(d.sessions) ? Object.fromEntries(Object.entries(d.sessions).filter(([, v]) => isObj(v) && typeof v.game === 'string' && typeof v.stake === 'number' && isObj(v.data))) as Record<string, Session> : {},
     settings: {
       masterVolume: num(settings.masterVolume, 1, 0, 1),

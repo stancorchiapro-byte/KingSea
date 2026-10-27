@@ -5,7 +5,7 @@
 // Jeux en plusieurs étapes (blackjack, poker, courses, Crash) : une « session » secrète est conservée ;
 // si le joueur disparaît, abandonSession() la termine selon la règle de table.
 import { bacSettle, playBaccarat, type BacBet } from '../games/logic/baccarat';
-import { BJ_TABLES, Blackjack, type Hand } from '../games/logic/blackjack';
+import { BJ_TABLES, Blackjack, insuranceCost, type BjTable, type Hand } from '../games/logic/blackjack';
 import { hiLo, Shoe, type Card } from '../games/logic/cards';
 import { crapsSettle, playCraps, type CrapsBet } from '../games/logic/craps';
 import { crashMultiplier, crashPoint, crashReturn, timeToReach } from '../games/logic/crash';
@@ -58,7 +58,7 @@ function need(s: AuthState, game: string): Session {
 }
 
 const BET_KINDS = new Set(['red', 'black', 'odd', 'even', 'low', 'high']);
-function rouletteBets(v: unknown): Bet[] {
+export function rouletteBets(v: unknown): Bet[] {
   if (!Array.isArray(v) || v.length === 0 || v.length > 60) throw new AuthError('Mises invalides');
   return v.map((b) => {
     const o = obj(b), k = obj(o.kind);
@@ -72,7 +72,7 @@ function rouletteBets(v: unknown): Bet[] {
   });
 }
 
-function namedBets<K extends string>(v: unknown, keys: readonly K[]): Partial<Record<K, number>> {
+export function namedBets<K extends string>(v: unknown, keys: readonly K[]): Partial<Record<K, number>> {
   const o = obj(v), out: Partial<Record<K, number>> = {};
   for (const [k, val] of Object.entries(o)) {
     if (!keys.includes(k as K)) throw new AuthError('Mise inconnue');
@@ -82,8 +82,8 @@ function namedBets<K extends string>(v: unknown, keys: readonly K[]): Partial<Re
   return out;
 }
 
-const total = (bets: Record<string, number | undefined>) => Object.values(bets).reduce<number>((a, b) => a + (b ?? 0), 0);
-function checkTotal(n: number): number { if (n <= 0 || n > MAX_TOTAL_STAKE) throw new AuthError('Mise totale invalide'); return n; }
+export const total = (bets: Record<string, number | undefined>) => Object.values(bets).reduce<number>((a, b) => a + (b ?? 0), 0);
+export function checkTotal(n: number): number { if (n <= 0 || n > MAX_TOTAL_STAKE) throw new AuthError('Mise totale invalide'); return n; }
 
 // ---------------------------------------------------------------- blackjack
 interface ShoeState { cards: Card[]; shuffles: number; base: number }
@@ -116,10 +116,34 @@ export function blackjackView(g: Blackjack, shoe: ShoeState, hilo: boolean): Rec
   return {
     phase: g.phase, active: g.active, hands,
     dealer: g.dealer.map((c, i) => (hidden && i === 1 ? HIDDEN : c)),
-    can: { hit: g.canHit(), stand: g.canStand(), double: g.canDouble(), split: g.canSplit() },
+    can: { hit: g.canHit(), stand: g.canStand(), double: g.canDouble(), split: g.canSplit(), insurance: insureSeat(g) >= 0 },
+    // Assurance par main principale (place) : décisions prises, et prochaine place à décider (−1 : aucune)
+    insurance: g.insurance, insureSeat: insureSeat(g), boxes: g.seats,
     remaining: g.shoe.remaining, shuffles: shoe.shuffles,
-    running: hilo ? shoe.base + visible.reduce((a, c) => a + hiLo(c), 0) : undefined,
+    // Comptage Hi-Lo des cartes visibles (outil facultatif, affiché à la demande ; toujours fourni depuis la refonte)
+    running: shoe.base + visible.reduce((a, c) => a + hiLo(c), 0),
+    hilo,
   };
+}
+
+/** Première main principale dont l'assurance reste à décider (−1 : aucune). */
+export function insureSeat(g: Blackjack): number { for (let i = 0; i < g.seats; i++) if (g.canInsure(i)) return i; return -1; }
+
+/** Nombre maximal de mains principales jouées en même temps par un joueur (chacune avec sa mise). */
+export const BJ_MAX_BOXES = 5;
+
+/**
+ * Mises d'une manche de blackjack : `bets` (1 à 5 mains principales, une mise par main) ou `bet` (une main).
+ * Chaque mise respecte le minimum et le maximum de la table ; le total doit être couvert par le solde.
+ */
+export function blackjackBets(input: Record<string, unknown>, table: BjTable | undefined): number[] {
+  const raw = input.bets !== undefined ? input.bets : [input.bet];
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > BJ_MAX_BOXES) throw new AuthError(`De 1 à ${BJ_MAX_BOXES} mains par manche`);
+  return raw.map((v) => {
+    const b = amount(v, table?.max ?? MAX_BET);
+    if (table && b < table.min) throw new AuthError(`Mise minimale à cette table : ${table.min} jetons`);
+    return b;
+  });
 }
 
 function blackjack(s: AuthState, game: string, action: string, input: Record<string, unknown>, reqId: string, env: AuthEnv): CasinoResult {
@@ -139,26 +163,34 @@ function blackjack(s: AuthState, game: string, action: string, input: Record<str
     // Table choisie : mise initiale entre le minimum et le maximum, niveau requis (ancienne version : limites d'origine)
     const table = typeof input.table === 'string' ? BJ_TABLES.find((t) => t.id === input.table) : undefined;
     if (input.table !== undefined && !table) throw new AuthError('Table inconnue');
-    const bet = amount(input.bet, table?.max ?? MAX_BET);
-    if (table) {
-      if (bet < table.min) throw new AuthError(`Mise minimale à cette table : ${table.min} jetons`);
-      if (s.progress && s.progress.level < table.level && !(table.id === 'vip' && s.progress.unlocks.includes('feature:vip-lounge'))) throw new AuthError(`Table ${table.name} : niveau ${table.level} requis`);
-    }
-    if (chips.balance(s) < bet) throw new AuthError('Pas assez de jetons : passe à la caisse du casino');
+    const bets = blackjackBets(input, table);
+    const bet = bets.reduce((a, b) => a + b, 0);
+    if (table && s.progress && s.progress.level < table.level && !(table.id === 'vip' && s.progress.unlocks.includes('feature:vip-lounge'))) throw new AuthError(`Table ${table.name} : niveau ${table.level} requis`);
+    if (chips.balance(s) < bet) throw new AuthError(bets.length > 1 ? `Pas assez de jetons pour ${bets.length} mains (${bet} jetons)` : 'Pas assez de jetons : passe à la caisse du casino');
     g = new Blackjack(env.rng);
     g.shoe.restore(shoe.cards);
     if (g.shoe.needsShuffle) { g.shoe.shuffle(); shoe.shuffles++; shoe.base = 0; }
-    g.deal(bet);
+    g.deal(bets);
     open(s, game, reqId, bet, { snapshot: g.snapshot(), table: table?.id ?? null }, env);
     stake = bet;
   } else if (action === 'act') {
     const sess = need(s, game);
     g = engineFrom(sess.data.snapshot, shoe, env);
     const move = input.move;
-    if (move === 'double' || move === 'split') {
+    if (move === 'insurance') {
+      // Assurance (croupier As) : moitié de la mise au plus, payée 2:1 si le croupier a un blackjack
+      // Une décision par main principale, dans l'ordre (identifiant de transaction propre à chaque main)
+      const seat = input.seat === undefined ? insureSeat(g) : input.seat;
+      if (typeof seat !== 'number' || !Number.isInteger(seat) || !g.canInsure(seat)) throw new AuthError('Assurance impossible');
+      const take = input.take === true;
+      const cost = take ? insuranceCost(g.hands.find((h) => (h.seat ?? 0) === seat)!.bet) : 0;
+      if (cost > 0) { chips.spend(s, cost, `${sess.tx}:assurance${seat ? `:${seat}` : ''}`); sess.stake += cost; stake = cost; }
+      g.insure(seat, take && cost > 0);
+    } else if (move === 'double' || move === 'split') {
       if (!(move === 'double' ? g.canDouble() : g.canSplit())) throw new AuthError('Action impossible');
       const extra = g.current!.bet;
-      chips.spend(s, extra, `${sess.tx}:${move}:${g.active}`);
+      // Identifiant unique : une main ne double qu'une fois ; chaque séparation crée une nouvelle main
+      chips.spend(s, extra, move === 'double' ? `${sess.tx}:double:${g.active}:${g.hands.length}` : `${sess.tx}:split:${g.hands.length}`);
       sess.stake += extra; stake = extra;
       if (move === 'double') g.double(input.faceDown === true); else g.split();
     } else if (move === 'hit') { if (!g.canHit()) throw new AuthError('Action impossible'); g.hit(); }
@@ -173,7 +205,7 @@ function blackjack(s: AuthState, game: string, action: string, input: Record<str
     payout = g.totalPayout;
     shoe.base += [...g.hands.flatMap((h) => h.cards), ...g.dealer].reduce((a, c) => a + hiLo(c), 0);
     close(s, game, payout, env);
-    view.running = hilo ? shoe.base : undefined;
+    view.running = shoe.base;
     view.totalStake = g.totalStake;
   }
   saveShoe(s, game, shoe, env);

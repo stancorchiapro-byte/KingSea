@@ -2,14 +2,18 @@
 // jeux d'arcade (plafonnées), drapeaux de progression et statistiques. Exécuté par l'autorité.
 import { MENUS, SNACK_ITEMS, VIP_DRINKS } from '../data/drinks';
 import { consumableId, ITEMS_BY_ID } from '../data/items';
-import { addItem, consume, exchange, tickNeeds, useItem, wake } from './economy';
+import { addItem, consume, ensureEconomy, exchange, itemCount, tickNeeds, useItem, wake } from './economy';
+import { keyCopy, keyRename, lockChange, ensureMasterKey } from './keys';
+import { PASS, passTier } from './pass';
+import { EMOTES } from '../data/emotes';
 import { pickSegment, WHEEL_SEGMENTS } from '../games/logic/wheel';
-import { claimMission, ensureProgress, missionEvent, onArcade, onVisit, refreshMissions } from './progress';
+import { claimMission, ensureProgress, missionEvent, onArcade, onVisit, refreshMissions, unlock } from './progress';
+import { chips as chipLedger } from './economy';
 import { amount, AuthError, incStat, ledger, obj, type AuthEnv, type AuthState } from './types';
 
 export const RECEPTION_GIFT = 100;
 export const DAILY_REWARD_CAP = 120;
-export const COLLECTIBLES: Record<string, number> = { 'golden-compass': 75 };
+export const COLLECTIBLES: Record<string, number> = { 'golden-compass': 75, 'star-chart': 60 };
 
 /** Récompense de chaque jeu d'arcade, calculée par l'autorité à partir du score (jamais fournie par le joueur),
  *  avec le score maximal plausible (au-delà, le score est refusé). */
@@ -21,10 +25,12 @@ export const ARCADE: Record<string, { better: 'high' | 'low'; min: number; max: 
   skeeball: { better: 'high', min: 0, max: 900, reward: (s) => Math.floor(s / 25) },
   mole: { better: 'high', min: 0, max: 150, reward: (s) => Math.floor(s / 2) },
   pinball: { better: 'high', min: 0, max: 5_000_000, reward: (s) => Math.floor(s / 500) },
+  // Circuit KS : temps total de 3 tours en dixièmes de seconde (≥ 45 s : plus rapide que le maximum physique impossible)
+  racing: { better: 'low', min: 450, max: 6000, reward: (s) => Math.max(5, Math.min(70, Math.floor((1500 - s) / 10))) },
 };
 
 const FLAG_KEYS = new Set(['engine.lights', 'cabin.dim', 'profile.done']);
-const STAT_KEYS = /^(emote\.(wave|clap|dance|heart)|greetings|naps|slides|swims)$/;
+const STAT_KEYS = new RegExp(`^(emote\\.(${EMOTES.map((e) => e.id).join('|')})|greetings|naps|slides|swims)$`);
 
 export interface PurserResult { view: Record<string, unknown>; stake: number; payout: number; done: boolean }
 
@@ -48,7 +54,7 @@ export function purserAction(s: AuthState, action: string, rawInput: unknown, re
     case 'shop-buy': {
       // Boutique KS : vêtements, accessoires, objets utilisables et cosmétiques
       const def = typeof input.item === 'string' ? ITEMS_BY_ID.get(input.item) : undefined;
-      if (!def || def.price <= 0 || def.type === 'food' || def.type === 'drink') throw new AuthError('Article indisponible en boutique');
+      if (!def || def.price <= 0 || def.type === 'food' || def.type === 'drink' || def.type === 'special' || def.exclusive) throw new AuthError('Article indisponible en boutique');
       ensureProgress(s);
       if ((def.level ?? 1) > s.progress.level) throw new AuthError(`Disponible au niveau ${def.level}`);
       if (def.slot && s.progress.unlocks.includes(def.id)) throw new AuthError('Tu possèdes déjà cet article');
@@ -79,11 +85,52 @@ export function purserAction(s: AuthState, action: string, rawInput: unknown, re
       return { view: { woke: true }, stake: 0, payout: 0, done: true };
     }
     case 'gift': {
+      // Cadeau de bienvenue de la réception : KSCoins et KS Pass Croisière (une seule fois chacun)
       const tx = 'gift:welcome';
-      if (ledger.has(s, tx)) return { view: { granted: 0, already: true }, stake: 0, payout: 0, done: true };
+      ensureEconomy(s);
+      const pass = grantPass(s);
+      if (ledger.has(s, tx)) return { view: { granted: 0, already: true, pass }, stake: 0, payout: 0, done: true };
       ledger.earn(s, RECEPTION_GIFT, tx);
       s.flags['gift.received'] = true;
-      return { view: { granted: RECEPTION_GIFT }, stake: 0, payout: RECEPTION_GIFT, done: true };
+      return { view: { granted: RECEPTION_GIFT, pass }, stake: 0, payout: RECEPTION_GIFT, done: true };
+    }
+    case 'key-copy': {
+      const key = keyCopy(s, reqId, env);
+      return { view: { key }, stake: 0, payout: 0, done: true };
+    }
+    case 'key-rename': {
+      const key = keyRename(s, input.uid, input.name);
+      return { view: { key }, stake: 0, payout: 0, done: true };
+    }
+    case 'lock-change': {
+      const lock = lockChange(s, reqId, env);
+      return { view: { lock }, stake: 0, payout: 0, done: true };
+    }
+    case 'keys': {
+      // Relevé du trousseau (crée la clé principale si la cabine vient d'être attribuée)
+      ensureMasterKey(s, env.seed);
+      return { view: { keys: s.keys }, stake: 0, payout: 0, done: true };
+    }
+    case 'pass-claim': {
+      ensureProgress(s); ensureEconomy(s);
+      const tier = input.tier;
+      if (typeof tier !== 'number' || !Number.isInteger(tier) || tier < 1 || tier > PASS.tiers.length) throw new AuthError('Palier inconnu');
+      const pass = s.progress.pass!;
+      if (passTier(pass.xp) < tier) throw new AuthError('Palier pas encore atteint');
+      if (pass.claimed.includes(tier)) throw new AuthError('Récompense déjà reçue');
+      const r = PASS.tiers[tier - 1], tx = `pass:${PASS.season}:${tier}`;
+      let given = r.label;
+      if (r.coins) ledger.earn(s, r.coins, tx);
+      if (r.chips) chipLedger.earn(s, r.chips, tx);
+      if (r.item) {
+        const def = ITEMS_BY_ID.get(r.item)!;
+        // Objet déjà au maximum : contre-valeur en KSCoins (jamais de récompense perdue)
+        if (itemCount(s, def.id) + 1 > def.stack) { ledger.earn(s, Math.max(20, def.price), `${tx}:valeur`); given = `${def.price} KSCoins (à la place de ${def.name})`; }
+        else addItem(s, def, 1);
+      }
+      if (r.unlock) unlock(s, r.unlock);
+      pass.claimed.push(tier);
+      return { view: { tier, label: given, pass }, stake: 0, payout: r.coins ?? 0, done: true };
     }
     case 'find': {
       const id = String(input.id), reward = COLLECTIBLES[id];
@@ -155,4 +202,13 @@ export function purserAction(s: AuthState, action: string, rawInput: unknown, re
     }
   }
   throw new AuthError('Action inconnue');
+}
+
+/** Remet le KS Pass Croisière (une seule fois, objet personnel). Renvoie vrai s'il vient d'être remis. */
+function grantPass(s: AuthState): boolean {
+  if (s.flags['item.ks-pass'] && itemCount(s, 'ks-pass') > 0) return false;
+  s.flags['item.ks-pass'] = true;
+  if (itemCount(s, 'ks-pass') > 0) return false;
+  addItem(s, ITEMS_BY_ID.get('ks-pass')!, 1);
+  return true;
 }

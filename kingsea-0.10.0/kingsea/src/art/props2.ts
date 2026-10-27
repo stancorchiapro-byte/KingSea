@@ -5,6 +5,8 @@ import type { PropDef, PropKind } from '../world/types';
 import { TILE } from '../world/types';
 import { roundRect } from './canvas';
 import { PAL } from './palette';
+import { symbolSprite } from '../games/SlotsGame';
+import { SLOT_MACHINES } from '../games/logic/slotMachines';
 
 const lg = (ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, stops: Array<[number, string]>) => {
   const g = ctx.createLinearGradient(x0, y0, x1, y1);
@@ -95,15 +97,25 @@ export function drawStatic2(ctx: CanvasRenderingContext2D, kind: PropKind, w: nu
       const th = SLOT_THEMES[variant];
       const top = -TILE * 1.5;
       shadow(ctx, 2, 4, w - 4, h - 4);
-      ctx.fillStyle = lg(ctx, 0, top, w, top, [[0, th.body], [0.5, shadeHex(th.body, 0.25)], [1, th.body]]);
+      // Caisson laqué, flancs chromés, fronton arrondi lumineux
+      ctx.fillStyle = lg(ctx, 0, top, w, top, [[0, shadeHex(th.body, -0.25)], [0.5, shadeHex(th.body, 0.25)], [1, shadeHex(th.body, -0.25)]]);
       roundRect(ctx, 3, top + 6, w - 6, h - top - 6, 5); ctx.fill();
-      ctx.fillStyle = PAL.gold; roundRect(ctx, 2, top, w - 4, 10, 4); ctx.fill();
-      ctx.fillStyle = '#0a0f1a'; roundRect(ctx, 6, top + 14, w - 12, 18, 2); ctx.fill(); // écran des rouleaux
-      ctx.fillStyle = th.light; ctx.globalAlpha = 0.85; roundRect(ctx, 6, top + 36, w - 12, 6, 2); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.arc(w - 4, top + 28, 2.6, 0, Math.PI * 2); ctx.fill(); // levier
-      ctx.fillStyle = '#9aa6b2'; ctx.fillRect(w - 4.6, top + 28, 1.2, 10);
-      ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(5, h - 12, w - 10, 4);
-      text(ctx, th.name, w / 2, top + 5, 4.2, PAL.deepNavy, 800);
+      ctx.fillStyle = lg(ctx, 0, 0, w, 0, [[0, '#cfcbc2'], [0.5, '#f4f1ea'], [1, '#8d8a85']]);
+      ctx.fillRect(2, top + 8, 1.6, h - top - 12); ctx.fillRect(w - 3.6, top + 8, 1.6, h - top - 12);
+      ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.moveTo(2, top + 10); ctx.quadraticCurveTo(w / 2, top - 6, w - 2, top + 10); ctx.lineTo(w - 2, top + 11); ctx.lineTo(2, top + 11); ctx.fill();
+      ctx.fillStyle = shadeHex(th.body, -0.4); ctx.beginPath(); ctx.moveTo(4, top + 10); ctx.quadraticCurveTo(w / 2, top - 3, w - 4, top + 10); ctx.closePath(); ctx.fill();
+      // Écran des rouleaux encastré
+      ctx.fillStyle = '#05070c'; roundRect(ctx, 5, top + 13, w - 10, 20, 3); ctx.fill();
+      ctx.strokeStyle = 'rgba(229,181,74,0.8)'; ctx.lineWidth = 0.8; roundRect(ctx, 5, top + 13, w - 10, 20, 3); ctx.stroke();
+      ctx.fillStyle = th.light; ctx.globalAlpha = 0.85; roundRect(ctx, 6, top + 36, w - 12, 5, 2); ctx.fill(); ctx.globalAlpha = 1;
+      // Plateau à boutons et bac à pièces
+      ctx.fillStyle = '#1a1410'; roundRect(ctx, 4, top + 44, w - 8, 6, 2); ctx.fill();
+      for (let i = 0; i < 3; i++) { ctx.fillStyle = ['#e74c3c', '#f1c40f', '#2ecc71'][i]; ctx.beginPath(); ctx.arc(9 + i * 6, top + 47, 1.4, 0, Math.PI * 2); ctx.fill(); }
+      ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.arc(w - 3, top + 24, 2.6, 0, Math.PI * 2); ctx.fill(); // levier
+      ctx.fillStyle = '#9aa6b2'; ctx.fillRect(w - 3.6, top + 24, 1.2, 12);
+      ctx.fillStyle = '#0c0a08'; roundRect(ctx, 7, h - 13, w - 14, 5, 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(7, h - 13, w - 14, 1);
+      text(ctx, th.name, w / 2, top + 6, 4.2, PAL.goldLight, 800);
       return true;
     }
     case 'rouletteTable': {
@@ -453,16 +465,34 @@ export function drawOverlay2(ctx: CanvasRenderingContext2D, p: PropDef, s: Anim2
       break;
     }
     case 'slotMachine': {
-      const th = SLOT_THEMES[variantOf(p)], top = -TILE * 1.5;
-      ctx.save(); ctx.beginPath(); ctx.rect(6, top + 14, w - 12, 18); ctx.clip();
+      // Mode démonstration : les rouleaux tournent, ralentissent puis s'arrêtent (cycle propre à chaque machine) ;
+      // de temps en temps une « ligne gagnante » fait clignoter la machine (pure animation de salle)
+      const v = variantOf(p), th = SLOT_THEMES[v], def = SLOT_MACHINES[v] ?? SLOT_MACHINES[0], top = -TILE * 1.5;
+      const scale = Math.abs(ctx.getTransform().a), px = Math.max(8, Math.round(7.5 * scale));
+      const cyc = 7 + (p.tx % 3), ph = (t + p.tx * 1.7) % cyc;
+      const sx = 6, sw = w - 12, sy = top + 14, sh = 18, rw = sw / 3;
+      const winning = Math.floor((t + p.tx * 1.7) / cyc) % 4 === 1 && ph > 2.4;
+      ctx.save(); ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
       for (let r = 0; r < 3; r++) {
-        const idx = Math.floor(t * 0.6 + r * 1.3 + p.tx) % 3;
-        ctx.font = '8px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(th.symbols[idx], 9.5 + r * ((w - 18) / 2), top + 23);
+        const stopAt = 1.2 + r * 0.45;
+        const spin = ph < stopAt ? (stopAt - ph) * 14 : 0;
+        const base = winning ? 5 - ((Math.floor((t + p.tx) / cyc) + 0) % 2) : (Math.floor((t + p.tx * 1.7) / cyc) * 7 + r * 3 + p.ty) % 6;
+        const off = spin % 1;
+        for (let k = -1; k <= 1; k++) {
+          const sym = def.symbols[(base + k + 6 + Math.floor(spin)) % 6];
+          const img = symbolSprite(sym, px).canvas as CanvasImageSource;
+          ctx.globalAlpha = spin > 0 ? 0.75 : 1;
+          ctx.drawImage(img, sx + r * rw + rw / 2 - 3.75, sy + sh / 2 - 3.75 + (k + off) * 8, 7.5, 7.5);
+        }
+        ctx.globalAlpha = 1;
       }
       ctx.restore();
-      const on = Math.sin(t * 5 + p.tx) > 0;
+      if (winning && Math.sin(t * 14) > 0) { ctx.fillStyle = 'rgba(255,226,154,0.25)'; roundRect(ctx, sx, sy, sw, sh, 2); ctx.fill(); }
+      // Reflet de la vitre
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + sw * 0.45, sy); ctx.lineTo(sx + sw * 0.25, sy + sh); ctx.lineTo(sx, sy + sh); ctx.fill();
+      const on = winning ? Math.sin(t * 16) > 0 : Math.sin(t * 5 + p.tx) > 0;
       ctx.fillStyle = on ? th.light : 'rgba(255,255,255,0.25)'; ctx.beginPath(); ctx.arc(w / 2, top - 2, 2.4, 0, Math.PI * 2); ctx.fill();
+      if (on && !s.lowFx) { ctx.fillStyle = 'rgba(255,240,190,0.25)'; ctx.beginPath(); ctx.arc(w / 2, top - 2, 5, 0, Math.PI * 2); ctx.fill(); }
       break;
     }
     case 'rouletteTable': {

@@ -27,6 +27,7 @@ export const ARCADE_GAMES: Activity[] = [
   { name: 'Skee-Ball', phase: 4 },
   { name: 'Tape-crabe (tape-taupe)', phase: 4 },
   { name: 'Flipper maritime', phase: 4 },
+  { name: 'Circuit KS (course automobile)', phase: 4 },
 ];
 
 /** Phase de développement atteinte par la version actuelle. */

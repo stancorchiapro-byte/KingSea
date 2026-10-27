@@ -1,3 +1,4 @@
+import { phoneIcon } from './itemIcons';
 // Interface en jeu : KSCoins (haut-gauche), étage (haut-centre), Étages & Paramètres (haut-droite),
 // bouton Interagir (bas-droite, sous le pouce) et Emotes. Tout respecte les zones de sécurité.
 import { roundRect } from '../art/canvas';
@@ -6,7 +7,7 @@ import type { Viewport } from '../engine/Viewport';
 import { ButtonLayer, font, Icons, makeButton, type Button } from './UIKit';
 import { BalanceDisplay, LevelDisplay, LevelUpOverlay } from './Wealth';
 
-export interface HudCallbacks { onFloors: () => void; onSettings: () => void; onInteract: () => void; onEmote: () => void; onInventory?: () => void; onChat?: () => void; onPlayers?: () => void; onMissions?: () => void }
+export interface HudCallbacks { onFloors: () => void; onSettings: () => void; onInteract: () => void; onEmote: () => void; onInventory?: () => void; onChat?: () => void; onPlayers?: () => void; onMissions?: () => void; onPhone?: () => void; onLevels?: () => void }
 
 export class Hud {
   readonly layer = new ButtonLayer(8);
@@ -23,16 +24,24 @@ export class Hud {
   /** Jauges faim / soif (0–100) et alerte la plus grave en cours. */
   needs: { hunger: number; thirst: number } | null = null;
   readonly invBtn: Button;
+  /** Téléphone KS (en ligne) et accès au panneau Niveaux & Passe (touche sur la barre d'XP). */
+  readonly phoneBtn: Button;
+  private levelBtn: Button;
+  /** Messages privés non lus (pastille du téléphone). */
+  phoneUnread = 0;
+  /** Paliers du passe prêts à réclamer (pastille sur la barre de niveau). */
+  passReady = 0;
   readonly level = new LevelDisplay();
   readonly levelUp = new LevelUpOverlay();
   /** Missions terminées non réclamées (pastille). */
   missionsReady = 0;
   /** État de la connexion (null : partie hors ligne). */
-  net: { state: 'online' | 'reconnecting'; others: number; unread: number } | null = null;
+  net: { state: 'online' | 'reconnecting'; others: number; unread: number; attempts?: number; nextIn?: number } | null = null;
   focusLabel: string | null = null;
 
   constructor(cb: HudCallbacks, tapSound: () => void) {
     this.layer.onTapSound = tapSound;
+    this.chips.bannerShift = 1; // bandeau des jetons sous celui des KSCoins
     this.floorsBtn = makeButton({ id: 'hud-floors', label: 'Étages', icon: Icons.elevator, style: 'round', fontSize: 10, onTap: cb.onFloors });
     this.settingsBtn = makeButton({ id: 'hud-settings', label: '', icon: Icons.gear, style: 'round', onTap: cb.onSettings });
     this.emoteBtn = makeButton({ id: 'hud-emote', label: '', icon: Icons.hand, style: 'round', onTap: cb.onEmote });
@@ -41,27 +50,50 @@ export class Hud {
     this.playersBtn = makeButton({ id: 'hud-players', label: '', icon: Icons.friends, style: 'round', visible: false, onTap: () => cb.onPlayers?.() });
     this.missionsBtn = makeButton({ id: 'hud-missions', label: '', icon: Icons.missions, style: 'round', onTap: () => cb.onMissions?.() });
     this.invBtn = makeButton({ id: 'hud-inventory', label: '', icon: Icons.bag, style: 'round', onTap: () => cb.onInventory?.() });
-    this.layer.buttons = [this.invBtn, this.floorsBtn, this.settingsBtn, this.missionsBtn, this.chatBtn, this.playersBtn, this.emoteBtn, this.interactBtn];
+    this.phoneBtn = makeButton({ id: 'hud-phone', label: '', icon: phoneIcon, style: 'round', visible: false, onTap: () => cb.onPhone?.() });
+    this.levelBtn = makeButton({ id: 'hud-levels', label: '', style: 'ghost', onTap: () => cb.onLevels?.(), draw: () => {} });
+    this.layer.buttons = [this.levelBtn, this.phoneBtn, this.invBtn, this.floorsBtn, this.settingsBtn, this.missionsBtn, this.chatBtn, this.playersBtn, this.emoteBtn, this.interactBtn];
   }
 
+  /** Largeur occupée en haut à gauche par les soldes (mesurée au dernier affichage). */
+  private leftW = 0;
+  private vp: Viewport | null = null;
+  /** Boutons en ligne empilés à droite (écran étroit). */
+  stacked = false;
+
   layout(v: Viewport, scale = 1, mirror = false): void {
-    const ui = v.ui, top = v.safe.top + 10 * ui, right = v.width - v.safe.right - 12 * ui;
-    const s = 50 * ui;
-    Object.assign(this.settingsBtn, { x: right - s, y: top, w: s, h: s });
-    Object.assign(this.floorsBtn, { x: right - s * 2 - 10 * ui, y: top, w: s, h: s });
-    Object.assign(this.missionsBtn, { x: right - s * 3 - 20 * ui, y: top, w: s, h: s });
-    Object.assign(this.playersBtn, { x: right - s * 4 - 30 * ui, y: top, w: s, h: s });
-    Object.assign(this.chatBtn, { x: right - s * 5 - 40 * ui, y: top, w: s, h: s });
+    this.vp = v;
+    const ui = v.ui;
+    this.arrangeTop(v);
+    const right = v.width - v.safe.right - 12 * ui;
     const big = 92 * ui * scale;
     const bottom = v.height - v.safe.bottom - 22 * ui;
     Object.assign(this.interactBtn, { x: right - big - 8 * ui, y: bottom - big, w: big, h: big });
     const e = 54 * ui * scale;
     Object.assign(this.emoteBtn, { x: this.interactBtn.x - e - 18 * ui, y: bottom - e + 4 * ui, w: e, h: e });
     Object.assign(this.invBtn, { x: this.interactBtn.x + (this.interactBtn.w - e) / 2 - e * 0.15, y: this.interactBtn.y - e - 14 * ui, w: e, h: e });
+    Object.assign(this.phoneBtn, { x: this.invBtn.x - e - 12 * ui, y: this.invBtn.y + e * 0.35, w: e, h: e });
     if (mirror) {
       // Mode gaucher : boutons d'action en bas à gauche (miroir)
-      for (const b of [this.interactBtn, this.emoteBtn, this.invBtn]) b.x = v.width - b.x - b.w + (v.safe.left - v.safe.right);
+      for (const b of [this.interactBtn, this.emoteBtn, this.invBtn, this.phoneBtn]) b.x = v.width - b.x - b.w + (v.safe.left - v.safe.right);
     }
+  }
+
+  /**
+   * Boutons du haut à droite. En ligne, deux boutons de plus (chat, joueurs) : sur un écran étroit (téléphone en
+   * portrait), ils ne tiennent plus sur la ligne sans recouvrir les soldes (KSCoins, jetons). Ils passent alors en
+   * colonne sous « Paramètres », au lieu de se superposer aux compteurs (icônes illisibles en ligne).
+   */
+  private arrangeTop(v: Viewport): void {
+    const ui = v.ui, top = v.safe.top + 10 * ui, right = v.width - v.safe.right - 12 * ui;
+    const s = 50 * ui, step = s + 10 * ui;
+    const row = [this.settingsBtn, this.floorsBtn, this.missionsBtn, ...[this.playersBtn, this.chatBtn].filter((b) => b.visible)];
+    const leftEdge = v.safe.left + 12 * ui + Math.max(this.leftW, 250 * ui) + 10 * ui;
+    const fits = right - row.length * step + 10 * ui >= leftEdge;
+    const inRow = fits ? row : row.slice(0, 3);
+    inRow.forEach((b, i) => Object.assign(b, { x: right - s - i * step, y: top, w: s, h: s }));
+    if (!fits) row.slice(3).forEach((b, i) => Object.assign(b, { x: right - s, y: top + (i + 1) * step, w: s, h: s }));
+    this.stacked = !fits;
   }
 
   setFocus(label: string | null): void {
@@ -72,6 +104,7 @@ export class Hud {
   }
 
   update(dt: number, balance: number, xp = 0, vw = 0, vh = 0, chips = 0): void {
+    if (this.vp) this.arrangeTop(this.vp); // largeur des soldes variable (nombre de chiffres, boutons en ligne)
     this.balance.update(dt, balance);
     this.chips.update(dt, chips);
     this.level.update(dt, xp);
@@ -113,7 +146,15 @@ export class Hud {
     // Jetons de casino, plus petits, à droite des KSCoins
     const cw = this.chips.render(ctx, px + bw0 + 8 * ui, top + 9 * ui, ph * 0.8, ui);
     const pw = bw0 + 8 * ui + cw;
+    this.leftW = pw;
     this.level.render(ctx, px + 2 * ui, top + ph + 12 * ui, Math.max(bw0, 132 * ui), ui);
+    Object.assign(this.levelBtn, { x: px, y: top + ph + 4 * ui, w: Math.max(bw0, 132 * ui) + 4 * ui, h: Math.max(44, 44 * ui) });
+    if (this.passReady > 0) {
+      const bx = px + Math.max(bw0, 132 * ui) + 10 * ui, by = top + ph + 18 * ui;
+      ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.arc(bx, by, 8 * ui, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#1a1208'; ctx.font = font(9.5 * ui, 900); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(Math.min(9, this.passReady)), bx, by + 0.5);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
     // Jauges faim et soif sous le niveau
     if (this.needs) this.renderNeeds(ctx, px + 2 * ui, top + ph + 36 * ui, Math.max(bw0, 132 * ui), ui, t);
 
@@ -122,7 +163,7 @@ export class Hud {
     ctx.font = font(14 * ui, 800);
     const fw = ctx.measureText(label).width + 32 * ui;
     const fx = v.width / 2 - fw / 2;
-    const rightmost = this.chatBtn.visible ? this.chatBtn.x : this.missionsBtn.x;
+    const rightmost = this.chatBtn.visible && !this.stacked ? this.chatBtn.x : this.missionsBtn.x;
     if (fx > px + pw + 8 && fx + fw < rightmost - 8) {
       roundRect(ctx, fx, top + 8 * ui, fw, 34 * ui, 17 * ui);
       ctx.fillStyle = 'rgba(14,11,16,0.6)'; ctx.fill();
@@ -132,7 +173,9 @@ export class Hud {
     }
     // Connexion : point vert (en ligne) ou orange (reconnexion), nombre d'autres joueurs à l'étage
     if (this.net) {
-      const on = this.net.state === 'online', txt2 = on ? `En ligne · ${this.net.others}` : 'Reconnexion…';
+      const on = this.net.state === 'online';
+      // Reconnexion : numéro de l'essai et délai avant le prochain (jamais un indicateur muet sans fin)
+      const txt2 = on ? `En ligne · ${this.net.others}` : (this.net.attempts ?? 0) > 1 ? `Reconnexion… essai ${this.net.attempts}${this.net.nextIn ? ` · ${this.net.nextIn} s` : ''}` : 'Reconnexion…';
       ctx.font = font(11 * ui, 800);
       const w2 = ctx.measureText(txt2).width + 26 * ui, y2 = top + ph + (this.needs ? 66 : 46) * ui;
       roundRect(ctx, px, y2, w2, 22 * ui, 11 * ui); ctx.fillStyle = 'rgba(14,11,16,0.7)'; ctx.fill();
@@ -158,6 +201,11 @@ export class Hud {
       const b = this.missionsBtn;
       ctx.save(); ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.arc(b.x + b.w - 6 * ui, b.y + 6 * ui, 9 * ui, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#1a1208'; ctx.font = font(10 * ui, 900); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(Math.min(9, this.missionsReady)), b.x + b.w - 6 * ui, b.y + 6.5 * ui); ctx.restore();
+    }
+    if (this.phoneUnread > 0 && this.phoneBtn.visible) {
+      const b = this.phoneBtn;
+      ctx.save(); ctx.fillStyle = PAL.danger; ctx.beginPath(); ctx.arc(b.x + b.w - 6 * ui, b.y + 6 * ui, 9 * ui, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = font(10 * ui, 900); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(Math.min(9, this.phoneUnread)), b.x + b.w - 6 * ui, b.y + 6.5 * ui); ctx.restore();
     }
     this.levelUp.render(ctx, v.width, v.height, ui);
   }

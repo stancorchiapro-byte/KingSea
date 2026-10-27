@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { LEGAL, PRIVACY, TERMS, legalText } from '../src/legal/texts';
+import { ARCADE_GAMES, CASINO_GAMES } from '../src/data/activities';
 
 const listing = JSON.parse(readFileSync('store/listing.json', 'utf8'));
 
@@ -25,7 +26,10 @@ test('fiches : limites des boutiques respectées (App Store et Google Play)', ()
 test('fiche cohérente avec le jeu : pas de pub, pas d’achat, nombre de mini-jeux', () => {
   assert.equal(listing.meta.ads, false);
   assert.equal(listing.meta.inAppPurchases, false);
-  assert.match(listing['fr-FR'].releaseNotes, /25 mini-jeux/);
+  // Casino (les « 5 autres machines à sous » comptent pour 5) + arcade + roue du jour
+  const n = CASINO_GAMES.length + 4 + ARCADE_GAMES.length + 1;
+  assert.match(listing['fr-FR'].releaseNotes, new RegExp(`${n} mini-jeux`));
+  assert.match(listing['en-US'].releaseNotes, new RegExp(`${n} mini-games`));
 });
 
 test('textes légaux : suppression du compte, droits, âge, aucune valeur réelle', () => {

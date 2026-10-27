@@ -68,8 +68,12 @@ test('blackjack : carte cachée et sabot jamais envoyés, mises supplémentaires
     const e = env({ rng: lcg(k + 1) });
     const r = handle(s, req('casino', 'blackjack-hilo', 'deal', { bet: 20 }), e);
     assert.ok(r.ok); if (!r.ok) return;
-    const v = r.view;
+    let v = r.view;
     assert.equal((v as Record<string, unknown>).shoe, undefined);
+    if (v.phase === 'insurance') {
+      const ri = handle(s, req('casino', 'blackjack-hilo', 'act', { move: 'insurance', take: false }), e);
+      assert.ok(ri.ok); if (!ri.ok) return; v = ri.view;
+    }
     if (v.phase === 'player') {
       assert.equal((v.dealer as Array<{ rank: number }>)[1].rank, 0, 'carte cachée masquée');
       assert.equal(JSON.stringify(v).includes('"cards":[') && JSON.stringify(s.sessions['blackjack-hilo'].data).length > 0, true);

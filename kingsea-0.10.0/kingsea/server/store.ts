@@ -4,9 +4,9 @@
 import type { Look } from '../src/art/characters';
 import type { Session } from '../src/authority/types';
 import type { MissionsState, ProgressState, RoomState } from '../src/authority/progress';
-import type { Inventory, NeedsState, PurseState } from '../src/authority/economy';
+import type { EconomyHolder, Inventory, NeedsState, PurseState } from '../src/authority/economy';
 
-export interface ServerProfile {
+export interface ServerProfile extends EconomyHolder {
   id: string; name: string; look: Look; created: number;
   wallet: { balance: number; processedTx: string[] };
   stats: Record<string, number>;
@@ -70,7 +70,24 @@ export interface Store {
   /** Crée l'amitié (dans les deux sens) et efface les demandes croisées. */
   addFriendship(a: string, b: string, at: number): void;
   removeFriendship(a: string, b: string): void;
+  // ---- Téléphone, dons (protocole 4)
+  /** Enregistre plusieurs profils dans une seule transaction (dons : expéditeur et destinataire ensemble). */
+  saveMany(ps: ServerProfile[], transfer?: Omit<TransferRow, 'id'>): void;
+  addMessage(from: string, to: string, text: string, at: number): DmRow;
+  /** Messages entre `a` et `b` vus par `a` (sans ceux qu'il a effacés), du plus ancien au plus récent. */
+  messages(a: string, b: string, before: number | null, limit: number): DmRow[];
+  /** Dernier message et non-lus de chaque conversation de `id`. */
+  conversations(id: string): Array<{ with: string; last: DmRow; unread: number }>;
+  markRead(id: string, from: string): void;
+  /** Efface la conversation pour `id` seulement (l'autre garde son historique). */
+  clearConversation(id: string, other: string): void;
+  contacts(id: string): Array<{ id: string; nick: string | null; fav: boolean }>;
+  setContact(owner: string, target: string, nick: string | null, fav: boolean): void;
+  transfers(id: string, limit: number): TransferRow[];
 }
+
+export interface DmRow { id: number; from: string; to: string; text: string; at: number; read: boolean }
+export interface TransferRow { id: number; from: string; to: string; kind: string; amount: number; item: string | null; label: string; tx: string; at: number }
 
 export interface FriendLink { id: string; since: number }
 export interface FriendRequest { from: string; to: string; at: number }
@@ -100,6 +117,40 @@ export class MemoryStore implements Store {
   private codes = new Map<string, string>();
   private fr = new Map<string, number>();
   private req: FriendRequest[] = [];
+  private dms: DmRow[] = [];
+  private cleared = new Map<string, number>();
+  private cts = new Map<string, Map<string, { nick: string | null; fav: boolean }>>();
+  private trs: TransferRow[] = [];
+  saveMany(ps: ServerProfile[], transfer?: Omit<TransferRow, 'id'>): void {
+    if (transfer && this.trs.some((t) => t.tx === transfer.tx)) throw new Error('transfert déjà enregistré');
+    for (const p of ps) this.save(p);
+    if (transfer) this.trs.push({ id: this.trs.length + 1, ...transfer });
+  }
+  addMessage(from: string, to: string, text: string, at: number): DmRow { const m = { id: this.dms.length + 1, from, to, text, at, read: false }; this.dms.push(m); return { ...m }; }
+  messages(a: string, b: string, before: number | null, limit: number): DmRow[] {
+    const cut = this.cleared.get(`${a}|${b}`) ?? 0;
+    return this.dms.filter((m) => ((m.from === a && m.to === b) || (m.from === b && m.to === a)) && m.id > cut && (before === null || m.id < before)).slice(-limit).map((m) => ({ ...m }));
+  }
+  conversations(id: string) {
+    const by = new Map<string, { with: string; last: DmRow; unread: number }>();
+    for (const m of this.dms) {
+      if (m.from !== id && m.to !== id) continue;
+      const other = m.from === id ? m.to : m.from;
+      if (m.id <= (this.cleared.get(`${id}|${other}`) ?? 0)) continue;
+      const e = by.get(other) ?? { with: other, last: m, unread: 0 };
+      e.last = { ...m };
+      if (m.to === id && !m.read) e.unread++;
+      by.set(other, e);
+    }
+    return [...by.values()].sort((x, y) => y.last.id - x.last.id);
+  }
+  markRead(id: string, from: string): void { for (const m of this.dms) if (m.to === id && m.from === from) m.read = true; }
+  clearConversation(id: string, other: string): void { this.markRead(id, other); this.cleared.set(`${id}|${other}`, this.dms.length); }
+  contacts(id: string) { return [...(this.cts.get(id) ?? new Map())].map(([k, v]) => ({ id: k, ...v })); }
+  setContact(owner: string, target: string, nick: string | null, fav: boolean): void {
+    const m = this.cts.get(owner) ?? new Map(); if (!nick && !fav) m.delete(target); else m.set(target, { nick, fav }); this.cts.set(owner, m);
+  }
+  transfers(id: string, limit: number): TransferRow[] { return this.trs.filter((t) => t.from === id || t.to === id).slice(-limit).reverse().map((t) => ({ ...t })); }
   createAccount(p: ServerProfile, cred: Omit<Credentials, 'id'>): boolean {
     if ([...this.acc.values()].some((a) => a.p.name.toLowerCase() === p.name.toLowerCase())) return false;
     this.acc.set(p.id, { p: structuredClone(p), cred: { id: p.id, ...cred } }); return true;
@@ -127,6 +178,9 @@ export class MemoryStore implements Store {
     this.codes.delete(id);
     for (const k of [...this.fr.keys()]) if (k.split('|').includes(id)) this.fr.delete(k);
     this.req = this.req.filter((r) => r.from !== id && r.to !== id);
+    this.dms = this.dms.filter((m) => m.from !== id && m.to !== id);
+    this.cts.delete(id); for (const m of this.cts.values()) m.delete(id);
+    for (const t of this.trs) { if (t.from === id) t.from = 'compte-supprimé'; if (t.to === id) t.to = 'compte-supprimé'; }
   }
   friendCode(id: string): string {
     let c = this.codes.get(id);
@@ -163,6 +217,14 @@ export async function openSqliteStore(file: string): Promise<Store> {
     CREATE INDEX IF NOT EXISTS friendships_b ON friendships (b);
     CREATE TABLE IF NOT EXISTS friend_requests (sender TEXT NOT NULL, recipient TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sender, recipient));
     CREATE INDEX IF NOT EXISTS friend_requests_to ON friend_requests (recipient);
+    CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS messages_pair ON messages (sender, recipient, id);
+    CREATE INDEX IF NOT EXISTS messages_to ON messages (recipient, read);
+    CREATE TABLE IF NOT EXISTS dm_cleared (owner TEXT NOT NULL, other TEXT NOT NULL, upto INTEGER NOT NULL, PRIMARY KEY (owner, other));
+    CREATE TABLE IF NOT EXISTS contacts (owner TEXT NOT NULL, target TEXT NOT NULL, nick TEXT, fav INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (owner, target));
+    CREATE TABLE IF NOT EXISTS transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL, item TEXT, label TEXT NOT NULL, tx TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS transfers_from ON transfers (sender);
+    CREATE INDEX IF NOT EXISTS transfers_to ON transfers (recipient);
   `);
   const q = {
     insert: db.prepare('INSERT INTO accounts (id, name, salt, hash, created, profile) VALUES (?, ?, ?, ?, ?, ?)'),
@@ -204,7 +266,30 @@ export async function openSqliteStore(file: string): Promise<Store> {
     delCodes: db.prepare('DELETE FROM friend_codes WHERE account = ?'),
     delFriends: db.prepare('DELETE FROM friendships WHERE a = ? OR b = ?'),
     delReqs: db.prepare('DELETE FROM friend_requests WHERE sender = ? OR recipient = ?'),
+    dmAdd: db.prepare('INSERT INTO messages (sender, recipient, text, at) VALUES (?, ?, ?, ?)'),
+    dmPair: db.prepare('SELECT id, sender AS "from", recipient AS "to", text, at, read FROM messages WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)) AND id > ? AND id < ? ORDER BY id DESC LIMIT ?'),
+    dmConvs: db.prepare(`SELECT m.id, m.sender AS "from", m.recipient AS "to", m.text, m.at, m.read, x.other,
+        (SELECT COUNT(*) FROM messages u WHERE u.recipient = ? AND u.sender = x.other AND u.read = 0 AND u.id > COALESCE((SELECT upto FROM dm_cleared WHERE owner = ? AND other = x.other), 0)) AS unread
+      FROM (SELECT CASE WHEN sender = ? THEN recipient ELSE sender END AS other, MAX(id) AS mid FROM messages WHERE sender = ? OR recipient = ? GROUP BY other) x
+      JOIN messages m ON m.id = x.mid
+      WHERE m.id > COALESCE((SELECT upto FROM dm_cleared WHERE owner = ? AND other = x.other), 0)
+      ORDER BY m.id DESC LIMIT 200`),
+    dmCut: db.prepare('SELECT upto FROM dm_cleared WHERE owner = ? AND other = ?'),
+    dmRead: db.prepare('UPDATE messages SET read = 1 WHERE recipient = ? AND sender = ? AND read = 0'),
+    dmMax: db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM messages'),
+    dmClear: db.prepare('INSERT OR REPLACE INTO dm_cleared (owner, other, upto) VALUES (?, ?, ?)'),
+    ctList: db.prepare('SELECT target AS id, nick, fav FROM contacts WHERE owner = ?'),
+    ctSet: db.prepare('INSERT OR REPLACE INTO contacts (owner, target, nick, fav) VALUES (?, ?, ?, ?)'),
+    ctDel: db.prepare('DELETE FROM contacts WHERE owner = ? AND target = ?'),
+    trAdd: db.prepare('INSERT INTO transfers (sender, recipient, kind, amount, item, label, tx, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+    trList: db.prepare('SELECT id, sender AS "from", recipient AS "to", kind, amount, item, label, tx, at FROM transfers WHERE sender = ? OR recipient = ? ORDER BY id DESC LIMIT ?'),
+    delDms: db.prepare('DELETE FROM messages WHERE sender = ? OR recipient = ?'),
+    delCleared: db.prepare('DELETE FROM dm_cleared WHERE owner = ? OR other = ?'),
+    delContacts: db.prepare('DELETE FROM contacts WHERE owner = ? OR target = ?'),
+    anonTrFrom: db.prepare("UPDATE transfers SET sender = 'compte-supprimé' WHERE sender = ?"),
+    anonTrTo: db.prepare("UPDATE transfers SET recipient = 'compte-supprimé' WHERE recipient = ?"),
   };
+  const dm = (r: Record<string, unknown>): DmRow => ({ id: Number(r.id), from: String(r.from), to: String(r.to), text: String(r.text), at: Number(r.at), read: Number(r.read) === 1 });
   return {
     createAccount(p, cred) {
       try { q.insert.run(p.id, p.name, cred.salt, cred.hash, p.created, JSON.stringify(p)); return true; } catch { return false; }
@@ -227,6 +312,7 @@ export async function openSqliteStore(file: string): Promise<Store> {
       try {
         q.delAcc.run(id); q.delTok.run(id); q.delCabin.run(id); q.delBlocks.run(id, id); q.anonReports.run(id); q.delSanction.run(id);
         q.delCodes.run(id); q.delFriends.run(id, id); q.delReqs.run(id, id);
+        q.delDms.run(id, id); q.delCleared.run(id, id); q.delContacts.run(id, id); q.anonTrFrom.run(id); q.anonTrTo.run(id);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
@@ -253,6 +339,27 @@ export async function openSqliteStore(file: string): Promise<Store> {
       try { q.frAdd.run(x, y, at); q.reqDel.run(a, b); q.reqDel.run(b, a); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
     removeFriendship(a, b) { const [x, y] = pair(a, b); q.frDel.run(x, y); },
+    saveMany(ps, transfer) {
+      db.exec('BEGIN');
+      try {
+        if (transfer) q.trAdd.run(transfer.from, transfer.to, transfer.kind, transfer.amount, transfer.item, transfer.label, transfer.tx, transfer.at);
+        for (const p of ps) q.save.run(JSON.stringify(p), p.name, p.id);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    },
+    addMessage(from, to, text, at) { const id = Number(q.dmAdd.run(from, to, text, at).lastInsertRowid); return { id, from, to, text, at, read: false }; },
+    messages(a, b, before, limit) {
+      const cut = Number((q.dmCut.get(a, b) as { upto: number } | undefined)?.upto ?? 0);
+      return (q.dmPair.all(a, b, b, a, cut, before ?? Number.MAX_SAFE_INTEGER, limit) as Array<Record<string, unknown>>).map(dm).reverse();
+    },
+    conversations(id) {
+      return (q.dmConvs.all(id, id, id, id, id, id) as Array<Record<string, unknown>>).map((r) => ({ with: String(r.other), last: dm(r), unread: Number(r.unread) }));
+    },
+    markRead(id, from) { q.dmRead.run(id, from); },
+    clearConversation(id, other) { q.dmRead.run(id, other); q.dmClear.run(id, other, Number((q.dmMax.get() as { n: number }).n)); },
+    contacts(id) { return (q.ctList.all(id) as Array<Record<string, unknown>>).map((r) => ({ id: String(r.id), nick: r.nick === null ? null : String(r.nick), fav: Number(r.fav) === 1 })); },
+    setContact(owner, target, nick, fav) { if (!nick && !fav) q.ctDel.run(owner, target); else q.ctSet.run(owner, target, nick, fav ? 1 : 0); },
+    transfers(id, limit) { return (q.trList.all(id, id, limit) as Array<Record<string, unknown>>).map((r) => ({ id: Number(r.id), from: String(r.from), to: String(r.to), kind: String(r.kind), amount: Number(r.amount), item: r.item === null ? null : String(r.item), label: String(r.label), tx: String(r.tx), at: Number(r.at) })); },
     setSanction(id, s) { if (s) q.setSanction.run(id, Math.min(s.banUntil, 8.64e15), Math.min(s.muteUntil, 8.64e15), s.reason); else q.delSanction.run(id); },
   };
 }

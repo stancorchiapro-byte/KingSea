@@ -1,10 +1,10 @@
 // Monde explorable : étage courant, personnage, PNJ, interactions, ascenseur, HUD et menus.
-import { ANIMS, drawLook, NPC_LOOKS, releaseLook, warmLook, type Anim, type Dir } from '../art/characters';
+import { ANIMS, drawLook, EMOTE_ANIMS, NPC_LOOKS, releaseLook, warmLook, type Anim, type Dir } from '../art/characters';
 import { Crowd, type Passenger } from '../entities/Passengers';
 import { findTiles, getStaticLayer, type StaticLayer } from '../art/floorRenderer';
 import { makeCanvas, roundRect } from '../art/canvas';
 import { PAL } from '../art/palette';
-import { CHARACTER_PROPS, drawPropOverlay, getPropVisual, hasOverlay, WALL_PROPS, type PropAnimState } from '../art/props';
+import { CHARACTER_PROPS, drawPropOverlay, getPropVisual, hasOverlay, propExtraTop, WALL_PROPS, type PropAnimState } from '../art/props';
 import type { PointerHandler, PointerInfo } from '../engine/Input';
 import { clamp } from '../engine/math';
 import type { Scene } from '../engine/Scene';
@@ -40,11 +40,14 @@ import { SLOT_MACHINES } from '../games/logic/slotMachines';
 import { variantOf } from '../art/props2';
 import { WheelGame } from '../games/WheelGame';
 import { MiniGameScene } from './MiniGameScene';
+import { RacingGame } from '../games/RacingGame';
 import { ProfileScene } from './ProfileScene';
 import type { Services } from '../systems/Services';
 import { BarMenu } from '../ui/BarMenu';
 import { ElevatorMenu } from '../ui/ElevatorMenu';
-import { EMOTES, EmoteMenu, type EmoteId } from '../ui/EmoteMenu';
+import { EmoteMenu, type EmoteId } from '../ui/EmoteMenu';
+import { drawEmoteIcon } from '../ui/emoteIcons';
+import { EMOTE_BY_ID, emoteUnlocked } from '../data/emotes';
 import { Hud } from '../ui/Hud';
 import { InfoDialog, type Modal } from '../ui/Modal';
 import { SettingsMenu } from '../ui/SettingsMenu';
@@ -67,25 +70,29 @@ import { FURNITURE_BY_ID } from '../data/furniture';
 import { DANCE_FLOOR } from '../world/floors/rooftop';
 import { AmbientFx, skyTint, type FxContext } from '../art/ambientFx';
 import { Presence, type ChatLine, type Remote } from '../net/Presence';
+import { PhoneState } from '../net/Phone';
+import { PhoneMenu } from '../ui/PhoneMenu';
+import { LevelsMenu, passClaimable } from '../ui/LevelsMenu';
+import { LocksmithMenu } from '../ui/LocksmithMenu';
 import type { NetAnim } from '../net/protocol';
 import { ChatInput } from '../ui/ChatInput';
 import { PlayersMenu } from '../ui/PlayersMenu';
 import { wrapText } from '../ui/UIKit';
 import { propActive, propInteractPoint, TileMap } from '../world/TileMap';
-import { isWaterChar, stairsArrival, TILE, type FloorDef, type PropDef } from '../world/types';
+import { isWaterChar, stairsArrival, TILE, type FloorDef, type LightDef, type PropDef } from '../world/types';
 import { CABIN_WALL_COLORS } from '../art/palette';
 import { AudioSystem } from '../systems/Audio';
 
-const AMBIENTS: Record<string, Ambient> = { cabinRoom: 'cabins', hub: 'hub', engine: 'engine', casino: 'casino', arcade: 'arcade', cabins: 'cabins', rooftop: 'rooftop' };
+const AMBIENTS: Record<string, Ambient> = { cabinRoom: 'cabins', panorama: 'cabins', hub: 'hub', engine: 'engine', casino: 'casino', arcade: 'arcade', cabins: 'cabins', rooftop: 'rooftop' };
 type Arrival = 'elevator' | 'up' | 'down';
 /** Musique par lieu : lounge bossa (hall), jazz (casino), chiptune (arcade), harpe (logements), lounge lo-fi (cabine),
  * tropical le jour / deep house la nuit (rooftop), deep house au salon VIP. */
-const MUSIC: Record<string, MusicTheme> = { hub: 'hub', engine: 'engine', casino: 'casino', arcade: 'arcade', cabins: 'cabins', rooftop: 'rooftop', cabinRoom: 'lounge' };
+const MUSIC: Record<string, MusicTheme> = { panorama: 'lounge', hub: 'hub', engine: 'engine', casino: 'casino', arcade: 'arcade', cabins: 'cabins', rooftop: 'rooftop', cabinRoom: 'lounge' };
 
 interface Npc { prop: PropDef; look: (typeof NPC_LOOKS)[string]; x: number; y: number; dir: Dir; busy: number; lookT: number }
 
 /** Passagers d'ambiance par étage (réduits de moitié avec « Effets réduits »). */
-const CROWD: Record<string, number> = { hub: 5, casino: 5, arcade: 4, cabins: 2, rooftop: 7, engine: 0 };
+const CROWD: Record<string, number> = { panorama: 2, hub: 5, casino: 5, arcade: 4, cabins: 2, rooftop: 7, engine: 0 };
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number; kind: 'spark' | 'bubble' | 'text' | 'confetti' | 'glint'; text?: string }
 
 const RECEPTION_GIFT = 100;
@@ -128,6 +135,10 @@ export class WorldScene implements Scene {
   private poolTiles: Array<{ x: number; y: number }> = [];
   /** Multijoueur : autres joueurs, chat (null hors ligne). */
   presence: Presence | null = null;
+  /** Téléphone KS (en ligne) : messages, contacts, cadeaux, visites. */
+  phone: PhoneState | null = null;
+  /** Cabine d'un autre joueur visitée (null : chez soi ou ailleurs). */
+  private visit: { owner: string; name: string; cabin: string | null } | null = null;
   private chatInput = new ChatInput();
   private unread = 0;
   private chatShowT = 0;
@@ -144,7 +155,12 @@ export class WorldScene implements Scene {
       onChat: () => this.openChat(),
       onPlayers: () => this.openFriends(),
       onMissions: () => this.openMissions(),
+      onPhone: () => this.openPhone(),
+      onLevels: () => this.openModal(new LevelsMenu(this.s)),
     }, () => s.audio.tap());
+    // Arrivée des pièces / jetons dans les compteurs : petits sons discrets, plus marqués à la dernière
+    this.hud.balance.onArrive = (i, n) => { if (i === n) { this.s.audio.coin(); this.s.haptic(15); } else if (i % 3 === 1) this.s.audio.tick(); };
+    this.hud.chips.onArrive = (i, n) => { if (i === n) { this.s.audio.chip(); this.s.haptic(15); } else if (i % 3 === 1) this.s.audio.tick(); };
     this.hud.levelUp.onShow = () => { this.s.audio.jackpot(); this.s.haptic([40, 60, 40, 60, 120]); };
     // XP et montées de niveau renvoyées par l'autorité (seulement quand le navire est à l'écran)
     s.progressListeners.add((p) => {
@@ -203,6 +219,8 @@ export class WorldScene implements Scene {
     const conn = this.s.net;
     if (!conn || !conn.profile) return;
     this.hud.chatBtn.visible = this.hud.playersBtn.visible = true;
+    this.hud.phoneBtn.visible = true;
+    this.startPhone(conn);
     this.presence = new Presence(conn, conn.profile.id, {
       onCorrect: (x, y) => { this.player.x = x; this.player.y = y; },
       onCabin: (id, wallColor) => {
@@ -218,12 +236,69 @@ export class WorldScene implements Scene {
       onReconnected: () => this.toasts.show('Reconnecté', 'success', 2),
       onChat: (line) => { if (!this.chatInput.open && !line.mine) this.unread++; this.chatShowT = 12; if (!line.mine) this.s.audio.tick(); },
       onChatError: (msg) => this.toasts.show(msg, 'error', 3),
+      onVisit: (v) => {
+        // Cabine d'un ami : son aménagement et sa couleur, envoyés par le serveur (instance privée de sa cabine)
+        this.visit = { owner: v.owner, name: v.name, cabin: v.cabin };
+        setCabinRoom(v.room); setCabinWallColor(v.wallColor);
+        this.loadFloor('cabin-interior', false, 'elevator', { x: this.player.x / TILE, y: this.player.y / TILE }, false);
+        this.toasts.show(`Bienvenue chez ${v.name}`, 'success', 2.6);
+      },
+      onEvict: (msg) => {
+        this.toasts.show(msg, 'info', 3.5);
+        if (this.floor.id === 'cabin-interior' && (this.visit || !this.s.data.cabin.id)) this.leaveVisit();
+        else if (this.visit) this.visit = null;
+      },
       onPlayers: (list) => this.openModal(new PlayersMenu(this.s, list, conn.profile!.id, this.presence!.blocked, {
         block: (id, on) => this.presence?.block(id, on),
         report: (id, reason) => this.presence?.report(id, reason),
         addFriend: (name) => { conn.send({ t: 'friendAdd', query: name }); this.openFriends(); },
       })),
     });
+  }
+
+  /** Téléphone KS : en ligne, branché au serveur ; hors ligne, il l'indique simplement. */
+  private openPhone(opts?: { giftKey?: string; chat?: string }): void {
+    this.openModal(new PhoneMenu(this.s, this.phone, opts));
+  }
+
+  private startPhone(conn: NonNullable<Services['net']>): void {
+    this.phone?.dispose();
+    this.phone = new PhoneState(conn, {
+      notify: (text, kind) => { this.toasts.show(text, kind, 3.6); if (kind !== 'error') this.s.audio.tick(); },
+      ring: (from, name) => {
+        this.s.audio.ding(); this.s.haptic([40, 80, 40]);
+        const m = new InfoDialog(this.s, 'On sonne à ta porte !', `${name} aimerait te rendre visite dans ta cabine.`, [
+          { label: 'Pas maintenant', style: 'ghost', onTap: () => this.phone?.answerRing(from, false) },
+          { label: 'Ouvrir la porte', style: 'gold', onTap: () => this.phone?.answerRing(from, true) },
+        ]);
+        this.openModal(m);
+      },
+      visitAccepted: (owner, name) => this.visitCabin(owner, name),
+      reply: (r) => { this.s.absorb('purser', 'purser', 'gift', r); },
+    });
+  }
+
+  /** Entrer dans la cabine d'un ami (invitation acceptée ou double de clé) : le serveur vérifie l'accès. */
+  visitCabin(owner: string, name: string): void {
+    if (!this.presence || this.travelling) return;
+    this.visit = { owner, name, cabin: null };
+    this.travelling = true; this.player.frozen = true; this.joystick.release();
+    this.s.audio.tap();
+    this.s.game.fadeThrough(() => {
+      try {
+        // On reste dans le couloir tant que le serveur n'a pas ouvert la porte (aménagement reçu → onVisit)
+        this.presence?.join('cabin-interior', 7 * TILE, 8.4 * TILE, owner);
+      } finally { this.travelling = false; this.player.frozen = false; }
+    }, 3.2);
+  }
+
+  /** Quitte la cabine visitée : retour au couloir devant sa porte, aménagement de sa propre cabine rétabli. */
+  private leaveVisit(): void {
+    const cabin = this.visit?.cabin;
+    this.visit = null;
+    setCabinRoom(this.s.data.room); setCabinWallColor(this.s.data.cabin.wallColor);
+    const door = getFloor('cabins')?.props?.find((p) => p.kind === 'cabinDoor' && p.id === (cabin ?? this.s.data.cabin.id));
+    this.goInterior('cabins', door ? { x: door.tx + 0.5, y: door.ty + 2.7 } : undefined);
   }
 
   private openChat(): void {
@@ -253,8 +328,19 @@ export class WorldScene implements Scene {
   }
 
   // ---------------------------------------------------------------- étages
-  loadFloor(id: string, initial = false, via: Arrival = 'elevator', at?: { x: number; y: number }): void {
-    const f = getPlayableFloor(id);
+  loadFloor(id: string, initial = false, via: Arrival = 'elevator', at?: { x: number; y: number }, join = true): void {
+    // Ponts réservés (KS Pass Croisière, niveau) : même règle que le serveur ; sinon retour au hall
+    const acc = this.s.floorAccess(id);
+    if (!acc.ok && id !== HUB_ID) {
+      this.toasts.show(acc.reason, 'info', 4.5);
+      if (this.floor && this.map) { this.travelling = false; this.player.frozen = false; return; }
+      id = HUB_ID; at = undefined;
+    }
+    // Quitter la cabine visitée : son aménagement laisse place au sien
+    if (id !== 'cabin-interior' && this.visit) { this.visit = null; setCabinRoom(this.s.data.room); setCabinWallColor(this.s.data.cabin.wallColor); }
+    if (id === 'cabin-interior' && !this.visit) { setCabinRoom(this.s.data.room); setCabinWallColor(this.s.data.cabin.wallColor); }
+    const f0 = getPlayableFloor(id);
+    const f = this.visit && id === 'cabin-interior' ? { ...f0, name: `Cabine de ${this.visit.name}`, description: `Cabine de ${this.visit.name} (invité)` } : f0;
     this.floor = f;
     this.map = TileMap.fromFloor(f, this.s.data.flags);
     this.layer = getStaticLayer(f);
@@ -298,7 +384,7 @@ export class WorldScene implements Scene {
     this.s.audio.setMusic(this.musicFor());
     this.s.audio.setClubLevel(0);
     if (f.id === 'cabins') this.ensureCabin();
-    this.presence?.join(f.id, this.player.x, this.player.y);
+    if (join) this.presence?.join(f.id, this.player.x, this.player.y, f.id === 'cabin-interior' ? this.visit?.owner : undefined);
     this.s.audio.setEngineBoost(this.s.flag('engine.lights'));
     // Découverte du lieu (XP la première fois) et missions d'exploration
     void this.s.ask('purser', 'purser', 'visit', { place: f.id });
@@ -415,7 +501,9 @@ export class WorldScene implements Scene {
     this.openModal(new InventoryMenu(this.s, {
       consumed: (d, eff) => this.showConsumed(d.type === 'food' ? 'food' : 'drink', d.colors[0], d.name, eff),
       used: (d, effect) => this.playItemEffect(effect, d.name),
-      placeDecor: inCabin ? () => this.openModal(new RoomEditor(this.s, this.s.data.cabin.wallColor, (room) => this.roomSaved(room), (i) => this.setWallColor(i))) : null,
+      phone: () => this.openPhone(),
+      giftKey: (uid) => this.openPhone({ giftKey: uid }),
+      placeDecor: inCabin && !this.visit ? () => this.openModal(new RoomEditor(this.s, this.s.data.cabin.wallColor, (room) => this.roomSaved(room), (i) => this.setWallColor(i))) : null,
       toast: (m, k) => this.toasts.show(m, k, 2.4),
     }));
   }
@@ -502,14 +590,26 @@ export class WorldScene implements Scene {
       case 'casino-board': this.casinoBoard(); break;
       case 'cabins-board': this.cabinsBoard(); break;
       case 'telescope': this.telescope(); break;
+      case 'star-map': this.starMap(); break;
+      case 'fountain': {
+        // Vœu gratuit : quelques éclaboussures dorées et un souhait au hasard (aucun coût, aucune promesse de gain)
+        const wishes = ['Que la mer reste calme…', 'Une croisière inoubliable !', 'Un jackpot au casino ?', 'Des amis dans chaque port.', 'Une cabine digne d’un amiral.'];
+        this.s.audio.splash(); this.burst(this.player.x, this.player.y - 40, PAL.goldLight, 18); this.s.incStat('wishes');
+        this.toasts.show(`Vœu : ${wishes[Math.floor(Math.random() * wishes.length)]}`, 'info', 2.8);
+        break;
+      }
+      case 'notice-board': this.openModal(new InfoDialog(this.s, 'Petites annonces du bord',
+        '• Rendre visite à un ami : téléphone KS › Contacts › « Sonner ». Ton ami t’ouvre (ou non) sa porte.\n• Un double de clé ouvre la cabine d’un ami sans sonner : demande-le-lui (serrurier, au bout du couloir).\n• Fermer ta porte à clé : téléphone › Ma cabine.\n• Cadeaux entre amis : 1 000 KSCoins et 2 objets par 24 heures.')); break;
+      case 'globe': this.globe(); break;
       case 'cabin-door': this.cabinDoor(it); break;
       case 'wheel': this.openGame(new WheelGame()); break;
       case 'cabin-exit': this.exitCabin(); break;
-      case 'wardrobe': this.wardrobe(); break;
+      case 'wardrobe': if (this.visit) { this.toasts.show('La garde-robe est celle de ton hôte : change de tenue dans ta cabine', 'info', 2.6); break; } this.wardrobe(); break;
+      case 'locksmith': this.openModal(new LocksmithMenu(this.s, (m, k) => this.toasts.show(m, k, 2.6))); break;
       case 'logbook-cabin': this.cabinLog(); break;
       case 'cabin-lamp': this.s.setFlag('cabin.dim', !this.s.flag('cabin.dim')); this.s.audio.switchOn(); this.toasts.show(this.s.flag('cabin.dim') ? 'Ambiance tamisée' : 'Lumière allumée', 'info', 1.6); break;
       case 'bed': this.s.game.fadeThrough(() => { this.toasts.show('Petite sieste… te voilà reposé !', 'success'); this.s.incStat('naps'); }, 1.2); break;
-      case 'decorate': this.openModal(new RoomEditor(this.s, this.s.data.cabin.wallColor, (room) => this.roomSaved(room), (i) => this.setWallColor(i))); break;
+      case 'decorate': if (this.visit) { this.toasts.show(`Seul(e) ${this.visit.name} peut aménager sa cabine`, 'info', 2.6); break; } this.openModal(new RoomEditor(this.s, this.s.data.cabin.wallColor, (room) => this.roomSaved(room), (i) => this.setWallColor(i))); break;
       case 'admire': {
         const f = FURNITURE_BY_ID.get(String((it.ref as PropDef | undefined)?.id ?? '').split('|')[0]);
         if (f) this.toasts.show(`${f.name} · pièce de ta collection`, 'reward', 2.4);
@@ -541,6 +641,7 @@ export class WorldScene implements Scene {
       case 'mole': this.openGame(new MoleGame()); break;
       case 'pinball': this.openGame(new PinballGame()); break;
       case 'billiards': this.openGame(new BilliardsGame()); break;
+      case 'racing': this.openGame(new RacingGame()); break;
       default: console.warn('[KingSea] interaction sans gestionnaire :', it.handler);
     }
   }
@@ -636,7 +737,18 @@ export class WorldScene implements Scene {
     const num = p?.id ?? '?';
     const mine = num === this.s.data.cabin.id;
     if (mine) { this.goInterior('cabin-interior'); return; }
-    this.openModal(new InfoDialog(this.s, `Cabine ${num}`, 'Cabine privée d’un autre passager. Ta cabine est celle qui porte la plaque dorée.'));
+    // Double de clé d'un ami pour cette porte : la serrure (vérifiée par le serveur) décide
+    const key = (this.s.data.keys ?? []).find((k) => !k.master && k.cabin === num && k.owner !== this.s.data.playerId);
+    if (key && this.presence) {
+      this.openModal(new InfoDialog(this.s, `Cabine ${num}`, `Tu as un double de cette porte : « ${key.name} ».`, [
+        { label: 'Fermer', style: 'ghost', onTap: () => {} },
+        { label: 'Ouvrir avec la clé', style: 'gold', onTap: () => this.visitCabin(key.owner, `la cabine ${num}`) },
+      ]));
+      return;
+    }
+    this.openModal(new InfoDialog(this.s, `Cabine ${num}`, this.presence
+      ? 'Cabine privée d’un autre passager. Pour rendre visite à un ami, sonne chez lui depuis ton téléphone (onglet Contacts) ou utilise un double de sa clé.'
+      : 'Cabine privée d’un autre passager. Ta cabine est celle qui porte la plaque dorée.'));
   }
 
   /** Entrer / sortir d'un intérieur avec un fondu (porte). */
@@ -651,6 +763,7 @@ export class WorldScene implements Scene {
   }
 
   private exitCabin(): void {
+    if (this.visit) { this.presence?.join('cabins', 0, 0); this.leaveVisit(); return; }
     const door = getFloor('cabins')?.props?.find((p) => p.kind === 'cabinDoor' && p.id === this.s.data.cabin.id);
     this.goInterior('cabins', door ? { x: door.tx + 0.5, y: door.ty + 2.7 } : undefined);
   }
@@ -667,25 +780,26 @@ export class WorldScene implements Scene {
     this.toasts.show(golden ? 'Le poisson doré est de retour !' : 'Des poissons tropicaux… On raconte qu’un poisson doré passe parfois.', 'info', 3);
   }
 
-  /** Écran d'infos du hall : heure, programme des étages, état du joueur, joueurs en ligne. */
+  /** Écran d'infos du hall : programme des étages, état du joueur, joueurs en ligne. */
   private infoScreen(): void {
-    const d = new Date(), hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
+    // Aucune heure d'horloge affichée dans le jeu : seulement l'ambiance du moment (soirée ou journée)
     const nd = this.s.needs.values, online = this.presence ? `\n\nPassagers en ligne autour de toi : ${this.presence.remotes.size}` : '';
-    const night = d.getHours() >= 19 || d.getHours() < 6;
-    this.openModal(new InfoDialog(this.s, `KingSea · ${hh}:${mm}`,
-      `Programme à bord :\n• Casino (1er) : jetons à la caisse, 13 jeux\n• Arcade (2e) : bowling, billard, flipper…\n• Cabines (3e) : ta chambre à décorer\n• Rooftop (4e) : piscine, snack, ${night ? 'soirée DJ en cours' : 'soirée DJ à partir de 19 h'}\n• Hall : bar, Boutique KS, roue du jour\n\n` +
+    const night = !!this.s.data.flags['rooftop.night'];
+    this.openModal(new InfoDialog(this.s, 'KingSea · Programme à bord',
+      `Programme à bord :\n• Casino (1er) : jetons à la caisse, 13 jeux\n• Arcade (2e) : bowling, billard, flipper…\n• Cabines (3e) : ta chambre à décorer\n• Rooftop (4e) : piscine, snack, ${night ? 'soirée DJ en cours' : 'soirée DJ à la tombée de la nuit'}\n• Hall : bar, Boutique KS, roue du jour\n\n` +
       `Toi : faim ${Math.round(nd.hunger)} / 100 · soif ${Math.round(nd.thirst)} / 100 · ${this.s.chips.balance.toLocaleString('fr-FR')} jetons${online}`));
   }
 
   /** Programme de l'arcade, avec tes records et tes médailles. */
   private arcadeBoard(): void {
     const st = this.s.data.stats;
-    const names: Record<string, string> = { bowling: 'Bowling', billiards: 'Billard (coups)', basket: 'Basket', football: 'Tirs au but', skeeball: 'Skee-Ball', mole: 'Tape-crabe', pinball: 'Flipper' };
+    const names: Record<string, string> = { bowling: 'Bowling', billiards: 'Billard (coups)', basket: 'Basket', football: 'Tirs au but', skeeball: 'Skee-Ball', mole: 'Tape-crabe', pinball: 'Flipper', racing: 'Circuit KS' };
     const medal = ['🥉', '🥈', '🥇'];
     const lines = Object.keys(ARCADE_INFO).map((g) => {
       const best = st[`best.${g}`];
       const m = best === undefined ? -1 : medalFor(g, best);
-      return `• ${names[g] ?? g} : ${best === undefined ? 'pas encore joué' : `record ${best}${m >= 0 ? ` ${medal[m]}` : ''}`}`;
+      const shown = best === undefined ? '' : g === 'racing' ? `${(best / 10).toFixed(1).replace('.', ',')} s` : String(best);
+      return `• ${names[g] ?? g} : ${best === undefined ? 'pas encore joué' : `record ${shown}${m >= 0 ? ` ${medal[m]}` : ''}`}`;
     });
     this.openModal(new InfoDialog(this.s, 'Programme de l’arcade', `${activityList(ARCADE_GAMES)}\n\nTes records :\n${lines.join('\n')}`));
   }
@@ -713,6 +827,35 @@ export class WorldScene implements Scene {
   }
 
   /** Longue-vue du rooftop : l'horizon le jour ; la nuit, parfois une étoile filante (secret). */
+  /** Carte du ciel du pont Panorama : constellations du bord ; relever l'étoile du Roi (secret, une seule fois). */
+  private starMap(): void {
+    const found = !!this.s.data.flags['found.star-chart'];
+    const night = !!this.s.data.flags['rooftop.night'];
+    this.openModal(new InfoDialog(this.s, 'Carte du ciel',
+      'Constellations visibles depuis le pont :\n• La Grande Ourse, pour trouver le nord\n• Cassiopée, le « W » des navigateurs\n• Orion et sa ceinture de trois étoiles\n\n' +
+      (found ? 'Tu as déjà relevé la position de l’étoile du Roi : elle est notée dans ton journal de cabine.' : `Au centre de la carte brille l’étoile du Roi, le repère des capitaines du KingSea.${night ? ' Cette nuit, elle est parfaitement visible.' : ''}`),
+      found ? undefined : [
+        { label: 'Fermer', style: 'ghost', onTap: () => {} },
+        { label: 'Relever sa position', style: 'gold', onTap: () => {
+          void this.s.ask('purser', 'purser', 'find', { id: 'star-chart' }).then((r) => {
+            if (!r.ok) { this.toasts.show(r.error, 'error'); return; }
+            this.s.data.flags['found.star-chart'] = true; this.s.incStat('secrets');
+            const n = Number(r.view.granted) || 0;
+            this.s.audio.discover(); this.burst(this.player.x, this.player.y - 30, PAL.goldLight, 24);
+            this.toasts.show(n > 0 ? `Étoile du Roi relevée : +${n} KSCoins` : 'Étoile du Roi relevée', 'reward', 3.5);
+          });
+        } },
+      ]));
+  }
+
+  /** Globe du pont Panorama : l'itinéraire de la croisière (escales) et la position du navire. */
+  private globe(): void {
+    this.s.audio.whoosh();
+    const stops = ['Port de départ · Baie Royale', 'Îles de Corail', 'Cap des Alizés', 'Lagon d’Émeraude', 'Retour · Baie Royale'];
+    const k = (this.s.progress.level + Object.keys(this.s.data.stats).length) % (stops.length - 1);
+    this.openModal(new InfoDialog(this.s, 'Itinéraire de la croisière', `${stops.map((st, i) => `${i === k ? '▶ ' : '   '}${st}`).join('\n')}\n\nLe KingSea navigue entre ${stops[k].split(' · ')[0]} et ${stops[k + 1].split(' · ')[0]}.`));
+  }
+
   private telescope(): void {
     this.s.audio.whoosh();
     const night = !!this.s.data.flags['rooftop.night'];
@@ -747,10 +890,10 @@ export class WorldScene implements Scene {
       d.flags['found.shooting-star'] ? '• Étoile filante vue à la longue-vue' : null,
       st['photos'] ? `• ${st['photos']} photo${st['photos'] > 1 ? 's' : ''} souvenir au coin photo` : null].filter(Boolean);
     const best = (k: string, unit: string) => (st[`best.${k}`] !== undefined ? `${st[`best.${k}`]} ${unit}` : '—');
-    const casinoPlays = Object.entries(st).filter(([k]) => k.startsWith('plays.') && !/plays\.(bowling|billiards|basket|football|skeeball|mole|pinball)$/.test(k)).reduce((a, [, v]) => a + v, 0);
+    const casinoPlays = Object.entries(st).filter(([k]) => k.startsWith('plays.') && !/plays\.(bowling|billiards|basket|football|skeeball|mole|pinball|racing)$/.test(k)).reduce((a, [, v]) => a + v, 0);
     this.openModal(new InfoDialog(this.s, `Journal de bord · ${d.name}`,
       `Souvenirs :\n${souvenirs.length ? souvenirs.join('\n') : '• Aucun pour l’instant (le navire cache des secrets…)'}\n\n` +
-      `Records : bowling ${best('bowling', 'pts')} · billard ${best('billiards', 'coups')} · basket ${best('basket', 'pts')} · tirs au but ${best('football', 'buts')} · Skee-Ball ${best('skeeball', 'pts')} · tape-crabe ${best('mole', 'pts')} · flipper ${best('pinball', 'pts')}\n` +
+      `Records : bowling ${best('bowling', 'pts')} · billard ${best('billiards', 'coups')} · basket ${best('basket', 'pts')} · tirs au but ${best('football', 'buts')} · Skee-Ball ${best('skeeball', 'pts')} · tape-crabe ${best('mole', 'pts')} · flipper ${best('pinball', 'pts')}${st['best.racing'] !== undefined ? ` · Circuit KS ${(st['best.racing'] / 10).toFixed(1).replace('.', ',')} s` : ''}\n` +
       `Parties de casino : ${casinoPlays} · passagers salués : ${st.greetings ?? 0}\n` +
       `Boissons commandées : ${st.drinksOrdered ?? 0} · snacks : ${st.snacksOrdered ?? 0}`));
   }
@@ -797,15 +940,15 @@ export class WorldScene implements Scene {
     const already = this.s.wallet.hasProcessed(gift) || !!this.s.data.flags['gift.received'];
     const text = already
       ? 'Bon retour à bord ! Casino au 1er, arcade au 2e, ta cabine au 3e et la piscine sur le rooftop. Et la salle des machines (sous-sol) cache peut-être quelque chose…'
-      : `Bienvenue sur KingSea ! Voici ${RECEPTION_GIFT} KSCoins de bienvenue pour commencer la croisière.\n\nPrends l’ascenseur pour explorer le navire. Le bar est juste à gauche.`;
+      : `Bienvenue sur KingSea ! Voici ton KS Pass Croisière (accès à tous les ponts) et ${RECEPTION_GIFT} KSCoins de bienvenue pour commencer la croisière.\n\nLe pass est rangé dans ton inventaire. Prends l’ascenseur pour explorer le navire ; le bar est juste à gauche.`;
     this.openModal(new InfoDialog(this.s, 'Réception', text, [{
-      label: already ? 'Merci !' : `Recevoir ${RECEPTION_GIFT} KSCoins`, style: already ? 'primary' : 'gold',
+      label: already ? 'Merci !' : `Recevoir le KS Pass et ${RECEPTION_GIFT} KSCoins`, style: already ? 'primary' : 'gold',
       onTap: () => {
         if (already) return;
         // Identifiant fixe côté autorité : impossible de le recevoir deux fois
         void this.s.ask('purser', 'purser', 'gift', {}).then((r) => {
           this.s.data.flags['gift.received'] = true; this.s.save.markDirty();
-          if (r.ok && (r.view.granted as number) > 0) { this.s.audio.coin(); this.burst(this.player.x, this.player.y - 30, PAL.gold); this.toasts.show(`+${RECEPTION_GIFT} KSCoins de bienvenue`, 'reward'); }
+          if (r.ok && (r.view.granted as number) > 0) { this.s.audio.coin(); this.burst(this.player.x, this.player.y - 30, PAL.gold); this.toasts.show(`KS Pass Croisière + ${RECEPTION_GIFT} KSCoins de bienvenue`, 'reward', 4); }
           else if (!r.ok) this.toasts.show(r.error, 'error');
         });
       },
@@ -846,7 +989,10 @@ export class WorldScene implements Scene {
 
   private playEmote(id: EmoteId): void {
     if (this.swimming || this.ride) return;
-    this.emote = { id, t: id === 'dance' ? (this.onDanceFloor ? Infinity : 3) : 2.2 };
+    const def = EMOTE_BY_ID.get(id);
+    if (!def || !emoteUnlocked(id, this.s.progress.unlocks)) { this.toasts.show('Émote pas encore débloquée', 'error', 2); return; }
+    // L'émote ne bloque pas le déplacement : bouger l'interrompt (sauf la danse sur la piste)
+    this.emote = { id, t: id === 'dance' && this.onDanceFloor ? Infinity : def.duration };
     this.s.incStat(`emote.${id}`);
     if (id === 'clap') this.s.audio.tap();
     this.presence?.emote(id);
@@ -902,11 +1048,23 @@ export class WorldScene implements Scene {
     this.t += dt;
     const g = this.s.game;
     this.toasts.update(dt);
+    // Gains : pièces et jetons partent du personnage (position à l'écran) vers leurs compteurs
+    {
+      const v = g.viewport, z = this.cam.zoom;
+      const home = { x: v.width / 2 + (this.player.x - this.cam.x) * z, y: v.height / 2 + (this.player.y - 30 - this.cam.y) * z };
+      this.hud.balance.home = home; this.hud.chips.home = home;
+      this.hud.balance.lowFx = this.hud.chips.lowFx = this.s.lowFx;
+      this.fx.lowFx = this.s.lowFx;
+    }
     this.hud.update(dt, this.s.wallet.balance, this.s.progress.xp, this.s.game.viewport.width, this.s.game.viewport.height, this.s.chips.balance);
+    this.hud.phoneUnread = this.phone?.unread ?? 0;
+    this.hud.passReady = passClaimable(this.s);
     this.hud.missionsReady = (this.s.data.missions ? [...this.s.data.missions.daily, ...this.s.data.missions.weekly] : []).filter((m) => missionStatus(m) === 'terminée').length;
     if (this.presence) {
       this.presence.update(dt, { x: this.player.x, y: this.player.y, dir: this.player.dir, anim: this.netAnim() });
-      this.hud.net = { state: this.presence.online ? 'online' : 'reconnecting', others: this.presence.count, unread: this.unread };
+      const cn = this.s.net;
+      this.hud.net = { state: this.presence.online ? 'online' : 'reconnecting', others: this.presence.count, unread: this.unread,
+        attempts: cn?.attempts ?? 0, nextIn: cn && cn.nextRetryAt ? Math.max(0, Math.ceil((cn.nextRetryAt - Date.now()) / 1000)) : 0 };
       this.chatShowT = Math.max(0, this.chatShowT - dt);
     }
     this.joystick.update(dt);
@@ -974,7 +1132,7 @@ export class WorldScene implements Scene {
       const vw = g.viewport.width / this.cam.zoom, vh = g.viewport.height / this.cam.zoom;
       this.fxCtx = {
         floorId: this.floor.id, props: this.floor.props ?? [], windows: this.layer.windows,
-        view: { x: this.cam.x - vw / 2, y: this.cam.y - vh / 2, w: vw, h: vh }, beat: this.beat, t: this.t, poolTiles: this.poolTiles,
+        view: { x: this.cam.x - vw / 2, y: this.cam.y - vh / 2, w: vw, h: vh }, beat: this.beat, t: this.t, poolTiles: this.poolTiles, bounds: { w: this.map.pixelWidth, h: this.map.pixelHeight },
         danceRect: this.floor.id === 'rooftop' ? { x: DANCE_FLOOR.x * TILE, y: DANCE_FLOOR.y * TILE, w: DANCE_FLOOR.w * TILE, h: DANCE_FLOOR.h * TILE } : null,
       };
       this.fx.update(dt, this.fxCtx);
@@ -1262,8 +1420,11 @@ export class WorldScene implements Scene {
       case 'sit': drawLook(ctx, r.look, 'sit', 'down', Math.floor(t * ANIMS.sit.fps), r.x, r.y + 2); return;
       case 'walk': case 'ride': drawLook(ctx, r.look, 'walk', r.dir, Math.floor(t * 10), r.x, r.y); return;
       case 'dance': drawLook(ctx, r.look, 'dance', 'down', Math.floor(this.t * 4), r.x, r.y); return;
-      case 'wave': case 'clap': case 'cheer': case 'interact': drawLook(ctx, r.look, r.anim, r.anim === 'interact' ? r.dir : 'down', Math.floor(t * ANIMS[r.anim].fps), r.x, r.y); return;
-      default: drawLook(ctx, r.look, 'idle', r.dir, Math.floor(t * ANIMS.idle.fps), r.x, r.y);
+      case 'interact': drawLook(ctx, r.look, 'interact', r.dir, Math.floor(t * ANIMS.interact.fps), r.x, r.y); return;
+      default:
+        // Émotes : même animation que chez l'émetteur (synchronisée par les instantanés de pose)
+        if (EMOTE_ANIMS.has(r.anim as Anim)) { drawLook(ctx, r.look, r.anim as Anim, 'down', Math.floor(t * ANIMS[r.anim as Anim].fps), r.x, r.y); return; }
+        drawLook(ctx, r.look, 'idle', r.dir, Math.floor(t * ANIMS.idle.fps), r.x, r.y);
     }
   }
 
@@ -1276,8 +1437,8 @@ export class WorldScene implements Scene {
     roundRect(ctx, r.x - w / 2, top - 6, w, 12, 6); ctx.fillStyle = 'rgba(14,11,16,0.75)'; ctx.fill();
     ctx.fillStyle = this.presence?.blocked.has(r.id) ? PAL.textDim : PAL.goldLight; ctx.fillText(r.name, r.x, top + 0.5);
     if (r.emote) {
-      const e = EMOTES.find((x) => x.id === r.emote!.e);
-      if (e) { ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.beginPath(); ctx.arc(r.x + 14, top - 14, 9, 0, Math.PI * 2); ctx.fill(); ctx.font = font(11, 400); ctx.fillText(e.glyph, r.x + 14, top - 13); }
+      const e = EMOTE_BY_ID.get(r.emote!.e);
+      if (e) { ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.beginPath(); ctx.arc(r.x + 14, top - 14, 9, 0, Math.PI * 2); ctx.fill(); drawEmoteIcon(ctx, e.id, r.x + 14, top - 14, 14); }
     }
     if (r.bubble) {
       ctx.font = font(8.5, 600);
@@ -1328,11 +1489,9 @@ export class WorldScene implements Scene {
     const pl = this.player;
     if (pl.moving) return { anim: 'walk', dir: pl.dir, frame: pl.frame, bob: 0 };
     if (this.emote) {
-      const id = this.emote.id;
-      if (id === 'dance') return { anim: 'dance', dir: 'down', frame: Math.floor(this.t * 4), bob: 0 };
-      if (id === 'wave') return { anim: 'wave', dir: 'down', frame: Math.floor(this.t * ANIMS.wave.fps), bob: 0 };
-      if (id === 'clap') return { anim: 'clap', dir: 'down', frame: Math.floor(this.t * ANIMS.clap.fps), bob: 0 };
-      return { anim: 'cheer', dir: 'down', frame: Math.floor(this.t * ANIMS.cheer.fps), bob: 0 };
+      const anim = (EMOTE_BY_ID.get(this.emote.id)?.anim ?? 'cheer') as Anim;
+      if (anim === 'dance') return { anim: 'dance', dir: 'down', frame: Math.floor(this.t * 4), bob: 0 };
+      return { anim, dir: 'down', frame: Math.floor(this.t * ANIMS[anim].fps), bob: 0 };
     }
     if (pl.actT > 0) return { anim: 'interact', dir: pl.dir, frame: pl.actT > 0.2 ? 1 : 0, bob: 0 };
     return { anim: 'idle', dir: pl.dir, frame: Math.floor(pl.idleT * ANIMS.idle.fps), bob: 0 };
@@ -1377,13 +1536,13 @@ export class WorldScene implements Scene {
     }
     // Bulle d'emote
     if (this.emote) {
-      const e = EMOTES.find((x) => x.id === this.emote!.id)!;
+      const e = EMOTE_BY_ID.get(this.emote!.id)!;
       const a = Math.min(1, this.emote.t * 4);
       const by = pl.y - 62 - (1 - a) * 6 + Math.sin(this.t * 6) * 1.5;
       ctx.save(); ctx.globalAlpha = a;
       ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.beginPath(); ctx.arc(pl.x, by, 11, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.moveTo(pl.x - 4, by + 9); ctx.lineTo(pl.x + 2, by + 9); ctx.lineTo(pl.x - 3, by + 15); ctx.fill();
-      ctx.font = font(13, 400); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(e.glyph, pl.x, by + 1);
+      if (e) drawEmoteIcon(ctx, e.id, pl.x, by, 16);
       ctx.restore();
     }
   }
@@ -1444,7 +1603,10 @@ export class WorldScene implements Scene {
       const focused = it === this.interactions.focused;
       if (it.quiet && !focused) continue;
       const wallMounted = it.hit.y < TILE; // objets muraux : étiquette sur la porte plutôt qu'au ras de l'écran
-      const top = (wallMounted ? it.y - TILE * 1.1 : it.hit.y + 2) + Math.sin(this.t * 3 + it.x) * 1.5;
+      // Objets hauts (écrans, bornes) : étiquette au-dessus du dessin, pas sur l'écran
+      const ref = it.ref as PropDef | undefined, ex = ref?.kind ? propExtraTop(ref.kind) : 0;
+      const baseTop = wallMounted ? it.y - TILE * 1.1 : ex >= 1 && ref ? ref.ty * TILE - ex * TILE - 2 : it.hit.y + 2;
+      const top = baseTop + Math.sin(this.t * 3 + it.x) * 1.5;
       let cx = it.hit.x + it.hit.w / 2;
       ctx.save();
       ctx.font = font(focused ? 9 : 8, 800);
@@ -1458,6 +1620,32 @@ export class WorldScene implements Scene {
       ctx.fillText(label, cx, top - th / 2 + 0.5);
       ctx.restore();
     }
+  }
+
+  /**
+   * Lumières fixes pré-rendues une fois par étage dans deux textures « monde » en basse résolution :
+   * masque (zones éclairées) et lueurs colorées. Avant : 2 dégradés radiaux recalculés par lumière et par
+   * image (≈ 7,5 ms/image au casino avec un processeur ralenti ×4, mesuré par dev/drawtime.mjs).
+   */
+  private lightCache: { floor: FloorDef; key: string; k: number; pad: number; mask: ReturnType<typeof makeCanvas>; glow: ReturnType<typeof makeCanvas> } | null = null;
+
+  private staticLights(lights: LightDef[], key: string) {
+    if (this.lightCache?.key === key && this.lightCache.floor === this.floor) return this.lightCache;
+    const k = 0.25, pad = TILE * 6;
+    const W = Math.ceil((this.map.pixelWidth + pad * 2) * k), H = Math.ceil((this.map.pixelHeight + pad * 2) * k);
+    const mask = makeCanvas(W, H), glow = makeCanvas(W, H);
+    for (const l of lights) {
+      const x = (l.x * TILE + pad) * k, y = (l.y * TILE + pad) * k, r = l.radius * TILE * k;
+      const g = mask.ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(0.6, 'rgba(0,0,0,0.55)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      mask.ctx.fillStyle = g; mask.ctx.beginPath(); mask.ctx.arc(x, y, r, 0, Math.PI * 2); mask.ctx.fill();
+      if (l.color === '255,255,255') continue;
+      const rg = r * 0.8, gg = glow.ctx.createRadialGradient(x, y, 0, x, y, rg);
+      gg.addColorStop(0, `rgba(${l.color},0.2)`); gg.addColorStop(1, `rgba(${l.color},0)`);
+      glow.ctx.fillStyle = gg; glow.ctx.fillRect(x - rg, y - rg, rg * 2, rg * 2);
+    }
+    this.lightCache = { floor: this.floor, key, k, pad, mask, glow };
+    return this.lightCache;
   }
 
   private renderLighting(ctx: CanvasRenderingContext2D, lowFx: boolean): void {
@@ -1475,22 +1663,42 @@ export class WorldScene implements Scene {
     if (L.dimFlag && this.s.flag(L.dimFlag)) dark = L.dimDarkness ?? dark;
     lc.fillStyle = `rgba(2,6,14,${dark})`;
     lc.fillRect(0, 0, lw, lh);
-    lc.globalCompositeOperation = 'destination-out';
     const flags = this.s.data.flags;
-    const lights = [...L.lights.filter((l) => !l.flag || flags[l.flag]), { x: this.player.x / TILE, y: (this.player.y - 16) / TILE, radius: 2.6, color: '255,255,255' }];
-    // Lumières hors écran ignorées (le casino en compte beaucoup)
-    const visible = lights.filter((l) => { const p = toS(l.x * TILE, l.y * TILE), r = l.radius * TILE * z * sc; return p.x + r > 0 && p.y + r > 0 && p.x - r < lw && p.y - r < lh; });
+    const on = L.lights.filter((l) => !l.flag || flags[l.flag]);
+    const fixed = on.filter((l) => !l.flicker), live = on.filter((l) => l.flicker);
+    const C = this.staticLights(fixed, `${on.length}|${this.map.pixelWidth}x${this.map.pixelHeight}`);
+    // Zone du monde visible → rectangle source dans les textures pré-rendues
+    const wx0 = this.cam.x - v.width / 2 / z, wy0 = this.cam.y - v.height / 2 / z, ww = v.width / z, wh = v.height / z;
+    const src = [(wx0 + C.pad) * C.k, (wy0 + C.pad) * C.k, ww * C.k, wh * C.k] as const;
+    lc.globalCompositeOperation = 'destination-out';
+    lc.drawImage(C.mask.canvas, src[0], src[1], src[2], src[3], 0, 0, lw, lh);
+    // Lumières animées (vacillantes) et lumière du joueur : dessinées à chaque image
+    const dyn = [...live, { x: this.player.x / TILE, y: (this.player.y - 16) / TILE, radius: 2.6, color: '255,255,255', flicker: false }];
+    const visible = dyn.filter((l) => { const p = toS(l.x * TILE, l.y * TILE), r = l.radius * TILE * z * sc; return p.x + r > 0 && p.y + r > 0 && p.x - r < lw && p.y - r < lh; });
     for (const l of visible) {
       const p = toS(l.x * TILE, l.y * TILE), r = l.radius * TILE * z * sc;
-      const flick = 'flicker' in l && l.flicker && !lowFx ? 0.85 + Math.sin(this.t * 13 + l.x) * 0.08 + Math.sin(this.t * 31) * 0.05 : 1;
+      const flick = l.flicker && !lowFx ? 0.85 + Math.sin(this.t * 13 + l.x) * 0.08 + Math.sin(this.t * 31) * 0.05 : 1;
       const g = lc.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * flick);
       g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(0.6, 'rgba(0,0,0,0.55)'); g.addColorStop(1, 'rgba(0,0,0,0)');
       lc.fillStyle = g; lc.beginPath(); lc.arc(p.x, p.y, r * flick, 0, Math.PI * 2); lc.fill();
     }
-    // Lueurs colorées peintes dans le même canevas (une seule copie plein écran par image : c'est le
-    // remplissage plein écran qui coûte le plus sur les téléphones modestes, audit phase 7)
+    // Lueurs colorées peintes dans le même canevas (une seule copie plein écran par image)
     if (!lowFx) {
       lc.globalCompositeOperation = 'source-over';
+      lc.drawImage(C.glow.canvas, src[0], src[1], src[2], src[3], 0, 0, lw, lh);
+      // Casino : deux projecteurs dorés qui balaient lentement la salle (peints dans le canevas d'éclairage
+      // en demi-résolution : quasiment gratuit, contrairement à un remplissage additif plein écran)
+      if (this.floor.id === 'casino') {
+        const B = { w: this.map.pixelWidth, h: this.map.pixelHeight };
+        for (let i = 0; i < 2; i++) {
+          const p = toS(B.w * (0.5 + 0.38 * Math.sin(this.t * 0.13 + i * 2.6)), B.h * (0.5 + 0.3 * Math.sin(this.t * 0.17 + i * 1.3)));
+          const r = TILE * 4.5 * z * sc;
+          if (p.x + r < 0 || p.y + r < 0 || p.x - r > lw || p.y - r > lh) continue;
+          const g = lc.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+          g.addColorStop(0, 'rgba(255,214,140,0.16)'); g.addColorStop(1, 'rgba(255,214,140,0)');
+          lc.fillStyle = g; lc.fillRect(p.x - r, p.y - r, r * 2, r * 2);
+        }
+      }
       for (const l of visible) {
         if (l.color === '255,255,255') continue;
         const p = toS(l.x * TILE, l.y * TILE), r = l.radius * TILE * z * 0.8 * sc;

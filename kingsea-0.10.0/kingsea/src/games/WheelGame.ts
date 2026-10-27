@@ -73,18 +73,24 @@ export class WheelGame implements MiniGame {
     this.message = '';
   }
 
+  private flap = 0;
+  private winIdx = -1;
+  private winAt = 0;
+
   update(dt: number): void {
     this.t += dt;
+    this.flap = Math.max(0, this.flap - dt * 9);
     if (this.anim) {
       const p = Math.min(1, (this.t - this.anim.start) / 4);
       const prev = this.angle;
       this.angle = this.anim.from + (this.anim.to - this.anim.from) * easeOutCubic(p);
       const seg = TAU / WHEEL_SEGMENTS.length;
-      if (Math.floor(prev / seg) !== Math.floor(this.angle / seg)) this.host.s.audio.tick();
+      if (Math.floor(prev / seg) !== Math.floor(this.angle / seg)) { this.host.s.audio.wheelTick(); this.flap = 1; }
       if (p >= 1) {
         const won = WHEEL_SEGMENTS[this.anim.idx].coins;
         this.message = `+${won} KSCoins ! À demain pour une nouvelle roue.`;
-        this.host.s.audio.win();
+        this.host.celebrate(won, 0, 'Roue du jour');
+        this.winIdx = this.anim.idx; this.winAt = this.t;
         this.anim = null;
       }
     }
@@ -129,14 +135,24 @@ export class WheelGame implements MiniGame {
     ctx.fillStyle = '#0b0a0d'; ctx.beginPath(); ctx.arc(0, 0, this.r * 0.22, 0, TAU); ctx.fill();
     ctx.strokeStyle = PAL.gold; ctx.lineWidth = 3; ctx.stroke();
     drawKSEmblem(ctx, 0, 0, this.r * 0.32, this.t, 'small', false);
-    // Pointeur
-    ctx.fillStyle = PAL.pearl; ctx.beginPath(); ctx.moveTo(-12 * ui, -this.r - 16 * ui); ctx.lineTo(12 * ui, -this.r - 16 * ui); ctx.lineTo(0, -this.r + 12 * ui); ctx.closePath(); ctx.fill();
+    // Case gagnante : liseré qui pulse
+    if (this.winIdx >= 0 && !this.anim) {
+      const a0 = this.angle + this.winIdx * seg, pulse = 0.5 + 0.5 * Math.sin((this.t - this.winAt) * 7);
+      ctx.strokeStyle = `rgba(255,236,170,${0.5 + pulse * 0.5})`; ctx.lineWidth = 4 * ui;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, this.r - 2 * ui, a0, a0 + seg); ctx.closePath(); ctx.stroke();
+    }
+    // Pointeur : languette qui se soulève à chaque cheville franchie
+    ctx.save(); ctx.translate(0, -this.r - 16 * ui); ctx.rotate(-this.flap * 0.35);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.moveTo(-10 * ui, 3 * ui); ctx.lineTo(14 * ui, 3 * ui); ctx.lineTo(2 * ui, 31 * ui); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = PAL.pearl; ctx.beginPath(); ctx.moveTo(-12 * ui, 0); ctx.lineTo(12 * ui, 0); ctx.lineTo(0, 28 * ui); ctx.closePath(); ctx.fill();
     ctx.strokeStyle = PAL.goldDark; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = PAL.gold; ctx.beginPath(); ctx.arc(0, 0, 5 * ui, 0, TAU); ctx.fill();
+    ctx.restore();
     ctx.restore();
 
     const a = this.host.area, portrait = a.h > a.w;
     const tx = portrait ? a.x + a.w / 2 : a.x + a.w * 0.72, ty = portrait ? this.cy + this.r + 40 * ui : a.y + a.h * 0.38;
-    if (this.message) drawPill(ctx, this.message, tx, ty, 14 * ui, 'rgba(14,11,16,0.85)', PAL.text);
+    if (this.message && !this.host.result.active) drawPill(ctx, this.message, tx, ty, 14 * ui, 'rgba(14,11,16,0.85)', PAL.text, portrait ? a.w - 20 * ui : a.w * 0.5);
     this.layer.render(ctx, ui);
   }
 }

@@ -16,6 +16,8 @@ import type { AuthReply, EcoSnapshot } from '../authority/types';
 import { RemoteBackend, type Connection } from '../net/Net';
 import type { OwnProfile } from '../net/protocol';
 import { createDefaultPlayer } from './PlayerData';
+import { EMOTE_BY_ID } from '../data/emotes';
+import { floorAccess } from '../authority/access';
 import { SAVE_KEY } from './SaveService';
 
 /** Téléphone à mémoire réduite (≤ 2 Go annoncés par le navigateur, quand il le dit). */
@@ -51,7 +53,7 @@ export class Services {
     const settled = this.local.settleAbandoned();
     if (settled.length) {
       const s0 = settled[0], label = GAME_LABELS[s0.game] ?? s0.game;
-      this.notice = `Partie de ${label} interrompue terminée : ${s0.payout > 0 ? `+${s0.payout} KSCoins` : 'mise perdue'}.`;
+      this.notice = `Partie de ${label} interrompue terminée : ${s0.payout > 0 ? `+${s0.payout} jetons` : 'mise perdue'}.`;
     }
 
     game.input.onFirstGesture = () => this.audio.unlock();
@@ -84,16 +86,24 @@ export class Services {
   async ask(kind: AskKind, game: string, action: string, input?: unknown): Promise<AuthReply> {
     try {
       const r = await this.backend.request(kind, game, action, input);
-      this.wallet.syncFrom(r.balance);
-      if (r.eco) this.applyEco(r.eco);
-      if (r.ok && r.prog) this.applyProgress(r.prog);
-      if (r.ok) for (const f of this.replyListeners) { try { f(kind, game, action, r); } catch (e) { console.error(e); } }
-      if (r.ok && r.done && r.payout > r.stake * 10 && r.stake > 0) this.haptic([40, 60, 40, 60, 120]);
-      else if (r.ok && r.done && r.payout > r.stake && r.stake > 0) this.haptic(35);
-      return r;
+      return this.absorb(kind, game, action, r);
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : 'Connexion perdue', balance: this.wallet.balance };
     }
+  }
+
+  /**
+   * Applique une réponse de l'autorité (soldes, inventaire, progression) et prévient les écouteurs. Utilisé par
+   * ask() et pour les réponses poussées par le serveur (manches de table, cadeaux reçus).
+   */
+  absorb(kind: AskKind, game: string, action: string, r: AuthReply): AuthReply {
+    this.wallet.syncFrom(r.balance);
+    if (r.eco) this.applyEco(r.eco);
+    if (r.ok && r.prog) this.applyProgress(r.prog);
+    if (r.ok) for (const f of this.replyListeners) { try { f(kind, game, action, r); } catch (e) { console.error(e); } }
+    if (r.ok && r.done && r.payout > r.stake * 10 && r.stake > 0) this.haptic([40, 60, 40, 60, 120]);
+    else if (r.ok && r.done && r.payout > r.stake && r.stake > 0) this.haptic(35);
+    return r;
   }
 
   /** Écouteurs des réponses acceptées par l'autorité (bilan de session des jeux du casino). */
@@ -114,6 +124,8 @@ export class Services {
     d.inventory = { items: { ...e.inv } };
     d.needs ??= { hunger: 100, thirst: 100, lastTick: 0, coma: null };
     d.needs.hunger = e.needs.hunger; d.needs.thirst = e.needs.thirst;
+    if (e.keys) d.keys = e.keys.map((k) => ({ ...k }));
+    if (e.lock !== undefined) { d.keyring ??= { lock: 1, made: 0 }; d.keyring.lock = e.lock; }
     this.eco = e;
     this.save.markDirty();
     for (const f of this.ecoListeners) { try { f(e); } catch (err) { console.error(err); } }
@@ -156,6 +168,16 @@ export class Services {
     }
   }
 
+  /**
+   * Accès à un pont (même règle que le serveur). Un passager qui a déjà reçu le cadeau de la réception a son
+   * KS Pass (remis par l'autorité à la prochaine requête si la sauvegarde date d'avant le pass).
+   */
+  floorAccess(id: string) {
+    const items = { ...(this.save.data.inventory?.items ?? {}) };
+    if (this.save.data.flags['gift.received']) items['ks-pass'] = Math.max(1, items['ks-pass'] ?? 0);
+    return floorAccess(id, items, this.progress.unlocks);
+  }
+
   /** Quantité d'un objet de l'inventaire (dernier état reçu de l'autorité). */
   itemCount(id: string): number { return this.save.data.inventory?.items[id] ?? 0; }
 
@@ -174,6 +196,7 @@ export class Services {
     d.progress.xp = p.xp; d.progress.level = p.level; d.progress.title = p.title;
     d.progress.unlocks.splice(0, d.progress.unlocks.length, ...p.unlocks);
     if (p.missions) d.missions = p.missions;
+    if (p.pass) d.progress.pass = p.pass;
     if (p.room) d.room = p.room;
     this.save.markDirty();
     if (p.gainedXp > 0 || p.levelUps.length) for (const f of this.progressListeners) { try { f(p); } catch (e) { console.error(e); } }
@@ -195,11 +218,14 @@ export class Services {
       cabin: { ...p.cabin }, location: { floorId: p.location.floorId }, settings,
       progress: p.progress, missions: p.missions ?? undefined, room: p.room,
       chips: { balance: p.chips ?? 0, processedTx: [] }, inventory: { items: { ...(p.inventory ?? {}) } }, needs: p.needs ? { ...p.needs, lastTick: 0, coma: null } : undefined,
+      keys: (p.keys ?? []).map((k) => ({ ...k })), keyring: { lock: Math.max(1, p.lock ?? 1), made: 0 },
     });
     this.save.switchTo(`kingsea.online.${p.id}`, d);
     this.wallet = this.makeWallet(); this.chips = this.makeChips();
     this.net = conn;
     this.backend = new RemoteBackend(conn);
+    // Réponse tardive (après le délai d'attente) : soldes, inventaire et jauges réalignés sur le serveur
+    conn.onLateReply = (r) => { this.wallet.syncFrom(r.balance); if (r.eco) this.applyEco(r.eco); };
   }
 
   /** Revient à la partie hors ligne (sauvegarde locale, autorité sur le téléphone). */
@@ -251,7 +277,7 @@ export class Services {
 
   incStat(key: string, by = 1): void {
     // Statistiques qui comptent pour les missions : passent par l'autorité (en ligne comme hors ligne)
-    if (/^(emote\.(wave|clap|dance|heart)|greetings|naps|slides|swims)$/.test(key)) { void this.ask('purser', 'purser', 'stat', { key, by: Math.min(20, by) }); return; }
+    if (/^(greetings|naps|slides|swims)$/.test(key) || (key.startsWith('emote.') && EMOTE_BY_ID.has(key.slice(6)))) { void this.ask('purser', 'purser', 'stat', { key, by: Math.min(20, by) }); return; }
     this.save.data.stats[key] = (this.save.data.stats[key] ?? 0) + by; this.save.markDirty();
   }
 

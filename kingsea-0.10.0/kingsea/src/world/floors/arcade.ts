@@ -31,6 +31,8 @@ export const arcadeFloor: FloorDef = {
     { kind: 'poolTable', tx: 3, ty: 5, w: 3, h: 2, solid: true, interact: { id: 'billiards', label: 'Billard', at: { x: 4.5, y: 7.5 }, radius: 1.8 } },
     { kind: 'poolTable', tx: 9, ty: 5, w: 3, h: 2, solid: true, interact: { id: 'billiards', label: 'Billard', at: { x: 10.5, y: 7.5 }, radius: 1.8 } },
     // Programme de l'arcade
+    // Simulateur du Circuit KS (course automobile)
+    { kind: 'raceSim', tx: 27, ty: 7, w: 3, h: 2, solid: true, hitbox: { x: 0, y: 0.6, w: 3, h: 1.4 }, interact: { id: 'racing', label: 'Circuit KS', at: { x: 28.5, y: 9.7 }, radius: 1.6 } },
     { kind: 'attendant', tx: 22, ty: 4, w: 1, h: 2, solid: true, hitbox: { x: 0, y: 1.4, w: 1, h: 0.6 } },
     { kind: 'infoBoard', tx: 20, ty: 5, w: 2, h: 1, solid: true, hitbox: { x: 0, y: 0.5, w: 2, h: 0.5 },
       interact: { id: 'arcade-board', label: 'Programme', at: { x: 21, y: 6.6 }, radius: 1.7 } },
