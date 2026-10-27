@@ -82,13 +82,15 @@ export function tableStake(s: AuthState, tx: string, stake: number): void {
   ensureEconomy(s);
   if (!Number.isInteger(stake) || stake <= 0) throw new AuthError('Mise invalide');
   if (chips.balance(s) < stake) throw new AuthError('Pas assez de jetons : passe à la caisse du casino');
+  // La mise initiale d'une manche exige un identifiant neuf (sinon son gain serait refusé comme « déjà versé »)
+  if (!/:(assurance|double|split)(:|$)/.test(tx) && !chips.fresh(s, tx)) throw new AuthError('Mise déjà enregistrée');
   if (!chips.apply(s, -stake, `${tx}:mise`)) throw new AuthError('Mise déjà enregistrée');
 }
 
 /** Verse le gain d'une manche de table (une seule fois) et compte la manche (statistiques, XP, missions). */
 export function tablePayout(s: AuthState, game: string, tx: string, payout: number, env: AuthEnv): boolean {
   ensureEconomy(s);
-  if (s.chips!.processedTx.includes(`${tx}:gain`)) return false;
+  if (s.chips!.processedTx.includes(`${tx}:gain`)) { console.error('[KingSea] gain de table déjà versé', tx); return false; }
   chips.apply(s, Math.max(0, Math.floor(payout)), `${tx}:gain`);
   incStat(s, `plays.${game}`);
   onRound(s, game, env);

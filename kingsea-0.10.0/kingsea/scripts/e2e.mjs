@@ -137,6 +137,31 @@ try {
   await tap(...(await btnCenter('window.__ks.scene.modal.layer.buttons[0]'))); await sleep(400);
   s = await state();
   check('Cadeau de bienvenue versé une seule fois', s.balance === b1 + 100 + (await sinceMark()).bonus, `${b1} → ${s.balance}`);
+  const keyInfo = await page.evaluate(() => { const d = window.__ks.services.data; return { cabin: d.cabin.id, masters: (d.keys ?? []).filter((k) => k.master).map((k) => k.cabin), pass: d.inventory?.items['ks-pass'] ?? 0 }; });
+  check('Réception : clé de SA cabine remise avec le KS Pass, une seule fois malgré la seconde visite', !!keyInfo.cabin && keyInfo.masters.length === 1 && keyInfo.masters[0] === keyInfo.cabin && keyInfo.pass === 1, JSON.stringify(keyInfo));
+
+  // Téléphone KS (hors ligne) : accueil, applications réelles, retour, menus du jeu lancés depuis le téléphone
+  await tap(...(await btnCenter('window.__ks.scene.hud.phoneBtn'))); await sleep(450);
+  const appIds = await page.evaluate(() => window.__ks.scene.modal?.layer.buttons.filter((b) => b.id.startsWith('app-')).map((b) => b.id) ?? []);
+  check('Téléphone : écran d’accueil avec ses 11 applications', appIds.length === 11, appIds.join(','));
+  await page.screenshot({ path: 'e2e-shots/06b-telephone.png' });
+  const openApp = async (id) => { await tap(...(await btnCenter(`window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'app-${id}')`))); await sleep(350); return page.evaluate(() => window.__ks.scene.modal?.currentApp); };
+  const goBack = async () => { await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ph-back')"))); await sleep(300); return page.evaluate(() => window.__ks.scene.modal?.currentApp); };
+  const appsOk = [];
+  for (const id of ['wallet', 'map', 'keys', 'cabin', 'messages']) appsOk.push((await openApp(id)) === id && (await goBack()) === 'home');
+  check('Téléphone : chaque application s’ouvre et « ‹ » revient à l’accueil', appsOk.every(Boolean), JSON.stringify(appsOk));
+  await openApp('keys');
+  const keysTxt = await page.evaluate(() => (window.__ks.services.data.keys ?? []).some((k) => k.master));
+  await page.screenshot({ path: 'e2e-shots/06c-telephone-cles.png' });
+  check('Téléphone : la clé reçue apparaît dans « Clés & pass »', keysTxt);
+  await page.keyboard.press('Escape'); await sleep(300);
+  check('Téléphone : Échap revient à l’accueil (sans fermer)', (await page.evaluate(() => window.__ks.scene.modal?.currentApp)) === 'home');
+  await openApp('inventory'); await sleep(200);
+  const invOpen = await page.evaluate(() => window.__ks.scene.modal?.title);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'close')"))); await sleep(500);
+  check('Téléphone : Inventaire ouvert depuis le téléphone, puis retour au téléphone', /Inventaire/i.test(invOpen ?? '') && (await page.evaluate(() => window.__ks.scene.modal?.currentApp)) === 'home', `${invOpen}`);
+  await tap(...(await btnCenter("window.__ks.scene.modal.layer.buttons.find((b) => b.id === 'ph-home')"))); await sleep(400);
+  check('Téléphone : barre d’accueil à l’accueil → téléphone rangé, jeu de nouveau jouable', !(await page.evaluate(() => !!window.__ks.scene.modal)));
 
   // Ascenseur via le bouton « Étages » du HUD
   await tap(...(await btnCenter('window.__ks.scene.hud.floorsBtn')));

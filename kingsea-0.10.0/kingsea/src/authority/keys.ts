@@ -24,17 +24,30 @@ export function cleanKeyName(raw: unknown): string {
   return t;
 }
 
-/** Garantit la clé principale de la cabine actuelle (et met à jour sa version de serrure). */
-export function ensureMasterKey(s: AuthState, ownerId: string | undefined): void {
+/**
+ * La clé principale est remise à la réception, avec le KS Pass et les KSCoins de bienvenue (drapeau
+ * « gift.received »). Une clé déjà détenue (profils antérieurs) est toujours conservée.
+ */
+export function keyHandedOver(s: AuthState): boolean { return !!s.flags['gift.received'] || !!s.flags['key.received']; }
+
+/**
+ * Tient à jour la clé principale de la cabine actuelle (version de serrure, propriétaire). Elle n'est créée que
+ * par la réception (`handOver`), après la remise du KS Pass. Renvoie la clé principale (null : aucune).
+ */
+export function ensureMasterKey(s: AuthState, ownerId: string | undefined, handOver = false): KeyItem | null {
   ensureEconomy(s);
   const cabin = s.cabin?.id ?? null;
   const keys = s.keys!;
   // Ancienne cabine : la clé principale correspondante disparaît (une seule cabine par passager)
   for (let i = keys.length - 1; i >= 0; i--) if (keys[i].master && keys[i].cabin !== cabin) keys.splice(i, 1);
-  if (!cabin || !ownerId) return;
+  if (!cabin || !ownerId) return null;
   const master = keys.find((k) => k.master);
-  if (master) { master.lock = s.keyring!.lock; master.owner = ownerId; return; }
-  keys.unshift({ uid: `master-${ownerId}-${cabin}`, cabin, owner: ownerId, master: true, name: `Clé de la cabine ${cabin}`, lock: s.keyring!.lock });
+  if (master) { master.lock = s.keyring!.lock; master.owner = ownerId; return master; }
+  if (!handOver || !keyHandedOver(s)) return null;
+  const key: KeyItem = { uid: `master-${ownerId}-${cabin}`, cabin, owner: ownerId, master: true, name: `Clé de la cabine ${cabin}`, lock: s.keyring!.lock };
+  keys.unshift(key);
+  s.flags['key.received'] = true;
+  return key;
 }
 
 /** Une clé ouvre-t-elle la cabine (même cabine, même propriétaire, serrure à jour) ? */

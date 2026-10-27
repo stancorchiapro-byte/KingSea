@@ -4,7 +4,7 @@
 // Pendant la saisie de texte (chat, pseudo…), le clavier ne pilote plus le jeu (filtré par Input).
 import type { Input } from './Input';
 
-export type Action = 'up' | 'down' | 'left' | 'right' | 'interact' | 'chat' | 'emote' | 'missions' | 'friends' | 'floors' | 'inventory' | 'help' | 'back';
+export type Action = 'up' | 'down' | 'left' | 'right' | 'interact' | 'chat' | 'emote' | 'missions' | 'friends' | 'floors' | 'inventory' | 'phone' | 'help' | 'back';
 
 export interface ActionDef { id: Action; label: string; keys: string[]; pad: string }
 
@@ -21,12 +21,13 @@ export const ACTIONS: ActionDef[] = [
   { id: 'friends', label: 'Amis', keys: ['KeyF'], pad: 'RB' },
   { id: 'floors', label: 'Étages (ascenseur)', keys: ['KeyL'], pad: 'Select' },
   { id: 'inventory', label: 'Inventaire', keys: ['KeyI'], pad: 'LT' },
+  { id: 'phone', label: 'Téléphone', keys: ['KeyP'], pad: 'RT' },
   { id: 'help', label: 'Aide des commandes', keys: ['F1', 'KeyH'], pad: '—' },
   { id: 'back', label: 'Retour / fermer', keys: ['Escape'], pad: 'B' },
 ];
 
 /** Boutons de manette (disposition « standard ») → action. */
-const PAD_BUTTONS: Partial<Record<Action, number>> = { interact: 0, back: 1, emote: 2, missions: 3, chat: 4, friends: 5, inventory: 6, floors: 8, up: 12, down: 13, left: 14, right: 15 };
+const PAD_BUTTONS: Partial<Record<Action, number>> = { interact: 0, back: 1, emote: 2, missions: 3, chat: 4, friends: 5, inventory: 6, phone: 7, floors: 8, up: 12, down: 13, left: 14, right: 15 };
 const START = 9;
 
 /** Nom lisible d'une touche (codes KeyboardEvent.code). */

@@ -7,7 +7,14 @@ import { PAL } from '../art/palette';
 import type { PointerHandler, PointerInfo } from '../engine/Input';
 
 export const FONT = '"Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif';
-export const font = (px: number, weight = 700) => `${weight} ${Math.round(px)}px ${FONT}`;
+/** Taille minimale de texte (px CSS) : sous ce seuil, un texte devient difficile à lire sur un petit téléphone. */
+export const MIN_TEXT = 11;
+/**
+ * Police d'interface. Les tailles suivent la hiérarchie de chaque écran (titres, textes, légendes) et l'échelle
+ * de l'écran ; elles ne descendent jamais sous MIN_TEXT, et gardent le demi-pixel (pas d'arrondi au pixel entier,
+ * qui écrasait les petites tailles).
+ */
+export const font = (px: number, weight = 700) => `${weight} ${Math.max(MIN_TEXT, Math.round(px * 2) / 2)}px ${FONT}`;
 export const MIN_TOUCH = 44;
 
 export type BtnStyle = 'primary' | 'secondary' | 'ghost' | 'round' | 'disabled' | 'danger' | 'gold';
@@ -174,13 +181,16 @@ export function drawButton(ctx: CanvasRenderingContext2D, b: Button, ui: number)
   }
   if (b.sub) {
     if (!b.icon) { ctx.textAlign = 'left'; tx = b.x + 16 * ui; }
-    ctx.font = font(fs, 800); ctx.fillText(b.label, tx, y + b.h / 2 - fs * 0.45, b.w - (tx - b.x) - 10 * ui);
-    ctx.font = font(fs * 0.72, 600); ctx.fillStyle = style === 'disabled' ? 'rgba(200,215,230,0.45)' : style === 'gold' ? 'rgba(14,11,16,0.75)' : PAL.textDim;
-    ctx.fillText(b.sub, tx, y + b.h / 2 + fs * 0.62, b.w - (tx - b.x) - 10 * ui);
+    const mw = b.w - (tx - b.x) - 10 * ui;
+    fitFont(ctx, b.label, fs, 800, mw); ctx.fillText(b.label, tx, y + b.h / 2 - fs * 0.45, mw);
+    fitFont(ctx, b.sub, fs * 0.72, 600, mw); ctx.fillStyle = style === 'disabled' ? 'rgba(200,215,230,0.45)' : style === 'gold' ? 'rgba(14,11,16,0.75)' : PAL.textDim;
+    ctx.fillText(b.sub, tx, y + b.h / 2 + fs * 0.62, mw);
   } else if (b.label) {
-    ctx.font = font(fs, 800);
-    const ly = b.icon && !(b.w > b.h * 2.6) ? y + b.h / 2 + fs * 0.6 : y + b.h / 2;
-    ctx.fillText(b.label, tx, ly, b.w - 12);
+    const mw = b.w - 12, ly = b.icon && !(b.w > b.h * 2.6) ? y + b.h / 2 + fs * 0.6 : y + b.h / 2;
+    const size = fitFont(ctx, b.label, fs, 800, mw);
+    // Trop long même réduit : deux lignes si le bouton est assez haut, plutôt qu'un texte écrasé
+    const lines = ctx.measureText(b.label).width > mw && !b.icon && b.h >= size * 2.5 ? wrapText(ctx, b.label, mw).slice(0, 2) : [b.label];
+    lines.forEach((l, i) => ctx.fillText(l, tx, ly + (i - (lines.length - 1) / 2) * size * 1.15, mw));
   }
   ctx.restore();
 }
@@ -203,6 +213,18 @@ export function drawPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w
     const d = 3 * ui; ctx.beginPath(); ctx.moveTo(cx, cy - d); ctx.lineTo(cx + d, cy); ctx.lineTo(cx, cy + d); ctx.lineTo(cx - d, cy); ctx.closePath(); ctx.fill();
   }
   ctx.restore();
+}
+
+/**
+ * Choisit la plus grande taille (≤ px, ≥ MIN_TEXT) pour laquelle le texte tient dans maxW, et l'applique.
+ * Évite les libellés écrasés par la largeur maximale de fillText. Renvoie la taille retenue.
+ */
+export function fitFont(ctx: CanvasRenderingContext2D, text: string, px: number, weight: number, maxW: number): number {
+  let size = Math.max(MIN_TEXT, px);
+  ctx.font = font(size, weight);
+  const w = ctx.measureText(text).width;
+  if (w > maxW && size > MIN_TEXT) { size = Math.max(MIN_TEXT, size * (maxW / w)); ctx.font = font(size, weight); }
+  return size;
 }
 
 /** Coupe un texte en lignes selon une largeur maximale. */

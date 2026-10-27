@@ -25,6 +25,9 @@ export abstract class Modal {
     this.closeBtn = makeButton({ id: 'close', style: 'round', icon: Icons.close, onTap: () => this.close() });
   }
 
+  /** Touche Retour : vrai si la fenêtre a géré le retour elle-même (sous-écran) ; sinon elle se ferme. */
+  back(): boolean { return false; }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;

@@ -119,21 +119,28 @@ export class LevelsMenu extends Modal {
     if (this.flash?.tier === tier) { ctx.globalAlpha = 1 - this.flash.t / 1.2; ctx.fillStyle = 'rgba(255,230,160,0.5)'; ctx.fill(); ctx.globalAlpha = 1; }
     const cx = b.x + b.w / 2;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = LUXE.champagne; ctx.font = font(12 * ui, 900); ctx.fillText(`Palier ${tier}`, cx, b.y + 16 * ui);
-    // Icône selon le type de récompense
-    const iy = b.y + b.h * 0.38, s = Math.min(b.w, b.h) * 0.26;
-    ctx.fillStyle = r.coins ? '#e5b54a' : r.chips ? '#e2445c' : r.item ? '#1fc7c1' : '#b88cff';
-    ctx.beginPath(); ctx.arc(cx, iy, s, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff'; ctx.font = font(s * 0.9, 900);
-    ctx.fillText(r.coins ? 'KS' : r.chips ? '◆' : r.item ? '★' : r.unlock?.startsWith('emote') ? '☺' : r.unlock?.startsWith('title') ? '§' : '✦', cx, iy + 1);
-    ctx.fillStyle = PAL.text; ctx.font = font(11 * ui, 700);
-    const words = r.label.split(' '); let line = '', ly = b.y + b.h * 0.64; const lines: string[] = [];
+    // Disposition en bandes qui ne se chevauchent pas : titre, icône (taille selon la place), libellé, XP
+    const titleY = b.y + 15 * ui, xpY = b.y + b.h - 13 * ui, lh = 14 * ui;
+    ctx.fillStyle = LUXE.champagne; ctx.font = font(12.5 * ui, 900); ctx.fillText(`Palier ${tier}`, cx, titleY, b.w - 10 * ui);
+    ctx.font = font(11.5 * ui, 700);
+    const words = r.label.split(' '); let line = ''; const lines: string[] = [];
     for (const w of words) { const t = line ? `${line} ${w}` : w; if (ctx.measureText(t).width > b.w - 12 * ui && line) { lines.push(line); line = w; } else line = t; }
     lines.push(line);
-    lines.slice(0, 3).forEach((l) => { ctx.fillText(l, cx, ly, b.w - 10 * ui); ly += 14 * ui; });
-    ctx.font = font(10.5 * ui, 800);
+    const shown = lines.slice(0, 2);
+    const labelTop = xpY - 11 * ui - shown.length * lh;
+    const room = labelTop - 4 * ui - (titleY + 10 * ui), s = Math.min(b.w * 0.24, room / 2);
+    if (s >= 8 * ui) {
+      const iy = titleY + 10 * ui + room / 2;
+      ctx.fillStyle = r.coins ? '#e5b54a' : r.chips ? '#e2445c' : r.item ? '#1fc7c1' : '#b88cff';
+      ctx.beginPath(); ctx.arc(cx, iy, s, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffffff'; ctx.font = font(s * 0.9, 900);
+      ctx.fillText(r.coins ? 'KS' : r.chips ? '◆' : r.item ? '★' : r.unlock?.startsWith('emote') ? '☺' : r.unlock?.startsWith('title') ? '§' : '✦', cx, iy + 1);
+    }
+    ctx.fillStyle = PAL.text; ctx.font = font(11.5 * ui, 700);
+    shown.forEach((l, i) => ctx.fillText(i === 1 && lines.length > 2 ? `${l}…` : l, cx, labelTop + lh * (i + 0.5), b.w - 10 * ui));
+    ctx.font = font(11.5 * ui, 800);
     ctx.fillStyle = claimed ? '#59e3a7' : ready ? LUXE.gold : PAL.textDim;
-    ctx.fillText(claimed ? 'Reçu ✓' : ready ? 'Réclamer' : `${tier * PASS.xpPerTier} XP`, cx, b.y + b.h - 14 * ui);
+    ctx.fillText(claimed ? 'Reçu ✓' : ready ? 'Réclamer' : `${tier * PASS.xpPerTier} XP`, cx, xpY, b.w - 10 * ui);
     ctx.restore();
   }
 

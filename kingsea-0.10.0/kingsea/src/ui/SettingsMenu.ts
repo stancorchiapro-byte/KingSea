@@ -59,8 +59,9 @@ export class SettingsMenu extends Modal {
     this.vp = vp;
     const ui = vp.ui;
     const wide = vp.width > vp.height || vp.width >= 560;
-    // Paysage : trois colonnes (12 réglages sur 4 lignes) pour garder des cibles de 44 px même sur petit écran
-    const rows = wide ? 5 : 12;
+    // Paysage : trois colonnes (12 réglages sur 4 lignes) pour garder des cibles de 44 px même sur petit écran.
+    // Portrait : volumes sur 4 lignes, puis les 8 options deux par ligne (libellé et valeur sur deux lignes, plus aérés)
+    const rows = wide ? 5 : 9;
     return { w: Math.min(maxW, (wide ? 900 : 420) * ui), h: Math.min(maxH, rows * 54 * ui + 60 * ui) };
   }
 
@@ -72,7 +73,7 @@ export class SettingsMenu extends Modal {
     const cols = wide ? 3 : 1;
     const colW = wide ? (this.content.w - 20 * ui * (cols - 1)) / cols : this.content.w;
     // Cibles tactiles d'au moins 44 px CSS, même sur les petits écrans en paysage (audit phase 7)
-    const rowH = Math.min(54 * ui, (this.content.h - 48 - 4 * ui) / (wide ? 5 : 12));
+    const rowH = Math.min(wide ? 54 * ui : 60 * ui, (this.content.h - 48 - 4 * ui) / (wide ? 5 : 8.4));
     const bh = Math.max(44, Math.min(44 * ui, rowH - 2));
     this.rows = [];
     let i = 0;
@@ -93,9 +94,18 @@ export class SettingsMenu extends Modal {
       });
       out.push(mk(`${key}-`, '−', bh * 2 + 8 * ui, -0.1), mk(`${key}+`, '+', bh, 0.1));
     };
+    let t = 0;
     const toggle = (label: string, value: string, onTap: () => void, active = false) => {
-      const p = slot();
-      out.push(makeButton({ id: label, label: `${label} : ${value}`, style: 'secondary', active, x: p.x, y: p.y + (rowH - bh) / 2, w: colW, h: bh, fontSize: 15, onTap }));
+      if (wide) {
+        const p = slot();
+        out.push(makeButton({ id: label, label: `${label} : ${value}`, style: 'secondary', active, x: p.x, y: p.y + (rowH - bh) / 2, w: colW, h: bh, fontSize: 15, onTap }));
+        return;
+      }
+      // Portrait : deux options par ligne, espacées
+      const gap = 10 * ui, w2 = (colW - gap) / 2, h2 = Math.max(48, rowH - 8 * ui);
+      const x = this.content.x + (t % 2) * (w2 + gap), y = this.content.y + (4 + Math.floor(t / 2)) * rowH + (rowH - h2) / 2;
+      t++;
+      out.push(makeButton({ id: label, label, sub: value, style: 'secondary', active, x, y, w: w2, h: h2, fontSize: 14, onTap }));
     };
 
     volume('Général', 'masterVolume');

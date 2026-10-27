@@ -85,14 +85,19 @@ export function purserAction(s: AuthState, action: string, rawInput: unknown, re
       return { view: { woke: true }, stake: 0, payout: 0, done: true };
     }
     case 'gift': {
-      // Cadeau de bienvenue de la réception : KSCoins et KS Pass Croisière (une seule fois chacun)
+      // Réception : KSCoins de bienvenue, KS Pass Croisière et clé de la cabine attribuée — chacun une seule fois.
+      // Interactions répétées : rien n'est reversé ; une clé manquante (cabine attribuée plus tard) est remise.
       const tx = 'gift:welcome';
       ensureEconomy(s);
       const pass = grantPass(s);
-      if (ledger.has(s, tx)) return { view: { granted: 0, already: true, pass }, stake: 0, payout: 0, done: true };
-      ledger.earn(s, RECEPTION_GIFT, tx);
+      // Drapeau en plus de l'historique (fenêtre glissante) : le cadeau ne peut jamais être reversé
+      const already = !!s.flags['gift.received'] || ledger.has(s, tx);
+      if (!already) ledger.earn(s, RECEPTION_GIFT, tx);
       s.flags['gift.received'] = true;
-      return { view: { granted: RECEPTION_GIFT, pass }, stake: 0, payout: RECEPTION_GIFT, done: true };
+      const hadKey = (s.keys ?? []).some((k) => k.master);
+      const key = ensureMasterKey(s, env.seed, true);
+      const view = { granted: already ? 0 : RECEPTION_GIFT, already, pass, key, keyNew: !!key && !hadKey, cabin: s.cabin?.id ?? null };
+      return { view, stake: 0, payout: already ? 0 : RECEPTION_GIFT, done: true };
     }
     case 'key-copy': {
       const key = keyCopy(s, reqId, env);

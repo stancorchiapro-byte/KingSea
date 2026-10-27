@@ -97,6 +97,7 @@ export class Services {
    * ask() et pour les réponses poussées par le serveur (manches de table, cadeaux reçus).
    */
   absorb(kind: AskKind, game: string, action: string, r: AuthReply): AuthReply {
+    if (r.ok) this.journal(kind, game, r);
     this.wallet.syncFrom(r.balance);
     if (r.eco) this.applyEco(r.eco);
     if (r.ok && r.prog) this.applyProgress(r.prog);
@@ -104,6 +105,22 @@ export class Services {
     if (r.ok && r.done && r.payout > r.stake * 10 && r.stake > 0) this.haptic([40, 60, 40, 60, 120]);
     else if (r.ok && r.done && r.payout > r.stake && r.stake > 0) this.haptic(35);
     return r;
+  }
+
+  /**
+   * Relevé des mouvements de jetons de la session (application du téléphone « Portefeuille »). Simple journal
+   * d'affichage construit à partir des réponses de l'autorité : il ne sert jamais de solde (le solde vient de l'autorité).
+   */
+  readonly chipLog: Array<{ label: string; delta: number; at: number }> = [];
+  private journal(kind: AskKind, game: string, r: AuthReply & { ok: true }): void {
+    const add = (label: string, delta: number) => { if (!delta) return; this.chipLog.unshift({ label, delta, at: Date.now() }); if (this.chipLog.length > 40) this.chipLog.pop(); };
+    if (kind === 'casino') {
+      const name = GAME_LABELS[game] ?? game;
+      if (r.stake > 0) add(`${name} · mise`, -r.stake);
+      if (r.done && r.payout > 0) add(`${name} · ${r.payout > r.stake && r.stake > 0 ? 'gain (mise comprise)' : 'retour'}`, r.payout);
+    } else if (game === 'purser' && r.view && typeof r.view.chips === 'number' && (r.view.dir === 'buy' || r.view.dir === 'sell')) {
+      add(r.view.dir === 'buy' ? 'Caisse · achat de jetons' : 'Caisse · revente de jetons', r.view.dir === 'buy' ? r.view.chips : -r.view.chips);
+    }
   }
 
   /** Écouteurs des réponses acceptées par l'autorité (bilan de session des jeux du casino). */

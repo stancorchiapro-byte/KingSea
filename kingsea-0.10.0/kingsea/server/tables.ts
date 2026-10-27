@@ -10,6 +10,7 @@ import { BJ_MAX_BOXES, blackjackBets, CRASH_AUTOS, drawRound, openRound, ROUND_G
 import { AuthError, amount, obj } from '../src/authority/types';
 import { BJ_TABLES, Blackjack, insuranceCost, type BjTable } from '../src/games/logic/blackjack';
 import { hiLo, Shoe, type Card } from '../src/games/logic/cards';
+import { randomUUID } from 'node:crypto';
 import { crashMultiplier, crashPoint, crashReturn, timeToReach } from '../src/games/logic/crash';
 import type { Look } from '../src/art/characters';
 import type { ServerMsg, TableSeat, TableState, TableSummary } from '../src/net/protocol';
@@ -39,6 +40,14 @@ const HIDDEN: Card = { rank: 0, suit: '♠' };
 export abstract class Table {
   readonly members = new Map<string, Member>();
   round = 1;
+  /**
+   * Identifiant unique de cette instance de table. Les numéros de table et de manche repartent de 1 quand une table
+   * est recréée ou que le serveur redémarre : sans cet identifiant, une nouvelle manche reprenait l'identifiant de
+   * transaction d'une ancienne (« table:…#1:1:joueur ») et son gain était ignoré comme « déjà versé ».
+   */
+  readonly uid = randomUUID().replace(/-/g, '').slice(0, 12);
+  /** Identifiant de transaction d'une manche pour un joueur (unique : instance, manche, joueur). */
+  roundTx(player: string): string { return `table:${this.id}:${this.uid}:${this.round}:${player}`; }
   constructor(readonly mgr: TableManager, readonly game: string, readonly num: number, readonly tier: string | null) {}
   get id(): string { return `${this.game}${this.tier ? `:${this.tier}` : ''}#${this.num}`; }
   get cap(): number { return TABLE_CAPACITY[this.game] ?? 5; }
@@ -97,7 +106,7 @@ class RoundTable extends Table {
     if (this.stage === 'show') return this.mgr.refuse(id, 'Tirage en cours : attends la prochaine manche');
     if (this.bets.has(id)) return this.mgr.refuse(id, 'Ta mise est déjà posée pour cette manche');
     if (!this.members.has(id)) return this.mgr.refuse(id, 'Tu n’es pas assis à cette table');
-    const tx = `table:${this.id}:${this.round}:${id}`;
+    const tx = this.roundTx(id);
     let entry: RoundEntry | null = null;
     const reply = this.mgr.host.withProfile(id, (p) => transact(p, this.mgr.host.env(id), () => {
       const bet = validateRoundBet(this.rg, obj(raw), this.ctx);
@@ -181,7 +190,7 @@ class CrashTable extends Table {
     if (this.stage === 'flying' || this.stage === 'crashed') return this.mgr.refuse(id, 'Vol en cours : mise pour le prochain départ dans un instant');
     if (this.bets.has(id)) return this.mgr.refuse(id, 'Ta mise est déjà posée pour ce vol');
     const input = obj(raw);
-    const tx = `table:${this.id}:${this.round}:${id}`;
+    const tx = this.roundTx(id);
     let bet: CrashBet | null = null;
     const reply = this.mgr.host.withProfile(id, (p) => transact(p, this.mgr.host.env(id), () => {
       const b = amount(input.bet, 100);
@@ -326,7 +335,7 @@ class BlackjackTable extends Table {
     if (this.stage !== 'open' && this.stage !== 'betting') return this.mgr.refuse(id, 'Main en cours : mise pour la prochaine distribution');
     if (this.pending.has(id)) return this.mgr.refuse(id, 'Ta mise est déjà posée');
     if (!this.members.has(id)) return this.mgr.refuse(id, 'Tu n’es pas assis à cette table');
-    const tx = `table:${this.id}:${this.round}:${id}`;
+    const tx = this.roundTx(id);
     const free = this.freeBoxes(id);
     let placed: BjPending | null = null;
     const reply = this.mgr.host.withProfile(id, (p) => transact(p, this.mgr.host.env(id), () => {

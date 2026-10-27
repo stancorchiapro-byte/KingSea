@@ -91,7 +91,13 @@ export const MAX_KEYS = 30;
 export function ensureEconomy(s: AuthState): asserts s is AuthState & Required<EconomyHolder> {
   if (!s.chips || !s.inventory || !s.needs) normalizeEconomy(s);
   if (!s.keys || !s.keyring || !s.giftLog) normalizeKeys(s);
-  if (!s.chips!.processedTx.includes('chips:welcome')) chips.earn(s, WELCOME_CHIPS, 'chips:welcome');
+  // Jetons de bienvenue : une seule fois, mémorisé par un drapeau. L'historique des transactions est une fenêtre
+  // glissante (400 entrées) : s'y fier seul faisait reverser 100 jetons dès que « chips:welcome » en sortait.
+  if (!s.flags['chips.welcome']) {
+    const legacy = s.chips!.processedTx.length > 0; // ancien profil : la bienvenue a déjà été versée
+    if (!legacy) chips.earn(s, WELCOME_CHIPS, 'chips:welcome');
+    s.flags['chips.welcome'] = true;
+  }
   // Téléphone KS : offert une fois à chaque passager (objet personnel)
   if (!s.flags['item.phone']) { s.flags['item.phone'] = true; if (!itemCount(s, 'phone')) s.inventory!.items.phone = 1; }
   // KS Pass Croisière : les passagers qui avaient déjà reçu le cadeau de la réception le reçoivent aussi
@@ -115,6 +121,20 @@ export const chips = {
     if (!chips.apply(s, -n, tx)) throw new AuthError('Opération déjà effectuée');
   },
   earn(s: AuthState, n: number, tx: string): void { if (n > 0) chips.apply(s, n, tx); },
+  /**
+   * Verse le gain d'une manche. Contrairement à earn(), un identifiant déjà utilisé n'est jamais ignoré en silence :
+   * la manche est refusée (et annulée par transact) plutôt que de garder la mise sans payer le gain.
+   */
+  credit(s: AuthState, n: number, tx: string): void {
+    if (!Number.isInteger(n) || n < 0) throw new AuthError('Gain invalide');
+    if (n === 0) return;
+    if (!chips.apply(s, n, tx)) throw new AuthError('Gain déjà versé pour cette manche');
+  },
+  /** Identifiant de manche encore jamais utilisé (ni mise, ni gain, ni remboursement enregistrés). */
+  fresh(s: AuthState, tx: string): boolean {
+    const p = s.chips!.processedTx;
+    return !p.includes(`${tx}:mise`) && !p.includes(`${tx}:gain`) && !p.includes(`${tx}:rembourse`);
+  },
 };
 
 /** Échange à la caisse. `buy` : KSCoins → jetons ; `sell` : jetons → KSCoins. Les deux soldes changent ensemble. */

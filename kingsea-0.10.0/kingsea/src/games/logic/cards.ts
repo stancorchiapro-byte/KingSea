@@ -5,7 +5,27 @@ export type Suit = '♠' | '♥' | '♦' | '♣';
 export const SUITS: Suit[] = ['♠', '♥', '♦', '♣'];
 export interface Card { rank: number; suit: Suit } // rank 1 (As) … 13 (Roi)
 
-export const rankLabel = (r: number): string => (r === 1 ? 'A' : r === 11 ? 'V' : r === 12 ? 'D' : r === 13 ? 'R' : String(r));
+/**
+ * Les 13 valeurs d'une couleur, en un seul endroit : rang logique (1 à 13), libellé imprimé sur la carte, nom et
+ * valeur au blackjack (l'As vaut 11, ou 1 si 11 ferait dépasser 21 : voir handValue). L'affichage ne sert jamais au
+ * calcul : les règles utilisent le rang et la valeur de cette table.
+ */
+export interface RankInfo { rank: number; label: string; name: string; blackjack: number }
+export const RANKS: readonly RankInfo[] = [
+  { rank: 1, label: 'A', name: 'As', blackjack: 11 },
+  ...[2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ rank: n, label: String(n), name: String(n), blackjack: n })),
+  { rank: 11, label: 'J', name: 'Valet', blackjack: 10 },
+  { rank: 12, label: 'Q', name: 'Dame', blackjack: 10 },
+  { rank: 13, label: 'K', name: 'Roi', blackjack: 10 },
+];
+export const SUIT_NAMES: Record<Suit, string> = { '♠': 'pique', '♥': 'cœur', '♦': 'carreau', '♣': 'trèfle' };
+/** Description complète d'une carte (rang, enseigne, libellé, valeur au blackjack). */
+export function cardInfo(c: Card): RankInfo & { suit: Suit; suitName: string; text: string } {
+  const r = RANKS[c.rank - 1];
+  if (!r) throw new Error(`Carte invalide : ${c.rank}`);
+  return { ...r, suit: c.suit, suitName: SUIT_NAMES[c.suit], text: `${r.name} de ${SUIT_NAMES[c.suit]}` };
+}
+export const rankLabel = (r: number): string => RANKS[r - 1]?.label ?? '?';
 export const isRed = (c: Card): boolean => c.suit === '♥' || c.suit === '♦';
 
 export class Shoe {
@@ -34,7 +54,8 @@ export class Shoe {
   stack(next: Card[]): void { this.cards.push(...[...next].reverse()); }
 }
 
-export const cardPoints = (c: Card): number => (c.rank === 1 ? 1 : Math.min(10, c.rank));
+/** Valeur « basse » d'une carte (As = 1) ; handValue compte un As à 11 quand c'est possible. */
+export const cardPoints = (c: Card): number => (c.rank === 1 ? 1 : RANKS[c.rank - 1]?.blackjack ?? 0); // carte cachée (rang 0) : 0
 
 /** Valeur d'une main de blackjack : les As valent 11 tant que la main ne dépasse pas 21. */
 export function handValue(cards: Card[]): { total: number; soft: boolean } {

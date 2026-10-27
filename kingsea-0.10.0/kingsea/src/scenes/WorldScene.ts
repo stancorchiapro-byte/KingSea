@@ -71,7 +71,7 @@ import { DANCE_FLOOR } from '../world/floors/rooftop';
 import { AmbientFx, skyTint, type FxContext } from '../art/ambientFx';
 import { Presence, type ChatLine, type Remote } from '../net/Presence';
 import { PhoneState } from '../net/Phone';
-import { PhoneMenu } from '../ui/PhoneMenu';
+import { PhoneMenu, type PhoneApp, type PhoneLinks } from '../ui/PhoneMenu';
 import { LevelsMenu, passClaimable } from '../ui/LevelsMenu';
 import { LocksmithMenu } from '../ui/LocksmithMenu';
 import type { NetAnim } from '../net/protocol';
@@ -196,6 +196,8 @@ export class WorldScene implements Scene {
     nd.onComa = (cause) => this.enterComa(cause);
     nd.onWake = () => this.wakeUp();
     void nd.prime();
+    // Téléphone KS : objet personnel de chaque passager, utilisable en ligne comme hors ligne
+    this.hud.phoneBtn.visible = true;
     this.startPresence();
     if (this.s.notice) { this.toasts.show(this.s.notice, 'reward', 6); this.s.notice = null; }
     const dest = this.s.destination;
@@ -203,8 +205,8 @@ export class WorldScene implements Scene {
     this.loadFloor(dest === 'casino' || dest === 'arcade' || dest === 'rooftop' ? dest : dest === 'cabin' ? 'cabins' : this.s.data.location.floorId, true);
     // « Ma chambre » : entrée directe dans la cabine si elle est attribuée (hors ligne : attribuée à l'arrivée)
     if (dest === 'cabin') {
-      if (this.s.data.cabin.id) this.loadFloor('cabin-interior', false);
-      else this.toasts.show('Ta cabine t’attend : porte à plaque dorée.', 'info', 4);
+      if (this.s.data.cabin.id && this.hasCabinKey()) this.loadFloor('cabin-interior', false);
+      else this.toasts.show(this.s.data.cabin.id ? 'Ta clé de cabine t’attend à la réception du hall.' : 'Ta cabine et sa clé te sont remises à la réception du hall.', 'info', 4);
     }
     if (dest === 'friends') this.pendingFriends = true;
     this.onResize();
@@ -256,9 +258,25 @@ export class WorldScene implements Scene {
     });
   }
 
-  /** Téléphone KS : en ligne, branché au serveur ; hors ligne, il l'indique simplement. */
-  private openPhone(opts?: { giftKey?: string; chat?: string }): void {
-    this.openModal(new PhoneMenu(this.s, this.phone, opts));
+  /**
+   * Téléphone KS (smartphone) : applications reliées aux systèmes du jeu ; celles du serveur (messages, contacts,
+   * cadeaux) indiquent hors ligne qu'elles demandent une partie en ligne.
+   */
+  openPhone(opts?: { giftKey?: string; chat?: string; app?: PhoneApp }): void {
+    if (this.comaCause) return;
+    const links: PhoneLinks = {
+      floor: this.floor.id,
+      travel: (id) => this.travel(id),
+      // Menus du jeu ouverts depuis le téléphone : à leur fermeture, retour à l'écran d'accueil du téléphone
+      launch: (app) => {
+        const m: Modal = app === 'inventory' ? this.inventoryMenu() : app === 'missions' ? new MissionsMenu(this.s) : app === 'levels' ? new LevelsMenu(this.s) : this.settingsMenu();
+        this.openModal(m);
+        const done = m.onClosed;
+        // Reprise différée : si ce menu en ouvre un autre (commandes, éditeur…), le téléphone ne revient pas par-dessus
+        m.onClosed = () => { done?.(); this.later(0.05, () => { if (!this.modal && this.s.game.current === this && !this.travelling) this.openPhone({ app: 'home' }); }); };
+      },
+    };
+    this.openModal(new PhoneMenu(this.s, this.phone, links, opts));
   }
 
   private startPhone(conn: NonNullable<Services['net']>): void {
@@ -322,7 +340,7 @@ export class WorldScene implements Scene {
   }
 
   onBack(): boolean {
-    if (this.modal) { this.modal.close(); return true; }
+    if (this.modal) { if (!this.modal.back()) this.modal.close(); return true; }
     this.openSettings();
     return true;
   }
@@ -451,15 +469,26 @@ export class WorldScene implements Scene {
   private ensureCabin(): void {
     const d = this.s.data;
     if (this.presence) { if (!d.cabin.id) this.presence.requestCabin(); return; } // en ligne : le serveur attribue
-    const reg = new CabinRegistry();
-    if (d.cabin.id && reg.restore(d.playerId, d.cabin.id)) return;
+    const fresh = !d.cabin.id;
+    const id = this.assignLocalCabin();
+    if (!id || !fresh) return;
+    this.refreshInteractables();
+    this.toasts.show(`Ta cabine : n°${id} (porte dorée)${this.hasCabinKey() ? '' : ' · clé à la réception'}`, 'reward', 4);
+  }
+
+  /** Hors ligne : cabine du registre local (restaurée ou attribuée). */
+  private assignLocalCabin(): string | null {
+    const d = this.s.data, reg = new CabinRegistry();
+    if (d.cabin.id && reg.restore(d.playerId, d.cabin.id)) return d.cabin.id;
     const id = reg.assign(d.playerId);
-    if (!id) return;
+    if (!id) return null;
     d.cabin.id = id;
     this.s.save.saveNow();
-    this.refreshInteractables();
-    this.toasts.show(`Ta cabine : n°${id} (porte dorée)`, 'reward', 4);
+    return id;
   }
+
+  /** Clé principale de sa cabine dans le trousseau (remise à la réception). */
+  private hasCabinKey(): boolean { return (this.s.data.keys ?? []).some((k) => k.master && k.cabin === this.s.data.cabin.id); }
 
   // ---------------------------------------------------------------- menus
   private openModal(m: Modal): void {
@@ -496,16 +525,18 @@ export class WorldScene implements Scene {
   }
 
   /** Inventaire (bouton sac du HUD, touche I) : consommer, porter, utiliser, placer. */
-  openInventory(): void {
+  openInventory(): void { this.openModal(this.inventoryMenu()); }
+
+  private inventoryMenu(): InventoryMenu {
     const inCabin = this.floor.id === 'cabin-interior';
-    this.openModal(new InventoryMenu(this.s, {
+    return new InventoryMenu(this.s, {
       consumed: (d, eff) => this.showConsumed(d.type === 'food' ? 'food' : 'drink', d.colors[0], d.name, eff),
       used: (d, effect) => this.playItemEffect(effect, d.name),
       phone: () => this.openPhone(),
       giftKey: (uid) => this.openPhone({ giftKey: uid }),
       placeDecor: inCabin && !this.visit ? () => this.openModal(new RoomEditor(this.s, this.s.data.cabin.wallColor, (room) => this.roomSaved(room), (i) => this.setWallColor(i))) : null,
       toast: (m, k) => this.toasts.show(m, k, 2.4),
-    }));
+    });
   }
 
   /** Effets des objets utilisables (visibles à l'écran du joueur). */
@@ -541,15 +572,17 @@ export class WorldScene implements Scene {
     this.openModal(new ElevatorMenu(this.s, this.floor.id, (id) => this.travel(id)));
   }
 
-  private openSettings(): void {
-    this.openModal(new SettingsMenu(this.s, {
+  private openSettings(): void { this.openModal(this.settingsMenu()); }
+
+  private settingsMenu(): SettingsMenu {
+    return new SettingsMenu(this.s, {
       onChanged: () => this.onResize(),
       onControls: () => this.openModal(new ControlsMenu(this.s)),
       onQuitToMenu: () => { this.presence?.dispose(); this.presence = null; this.chatInput.hide(); this.s.game.goto(this.toMenu); },
       onLogout: this.s.online ? () => { this.presence?.dispose(); this.presence = null; this.chatInput.hide(); this.s.net?.logout(); this.s.game.goto(this.toMenu); } : undefined,
       onAccountDeleted: () => { this.presence?.dispose(); this.presence = null; this.chatInput.hide(); this.s.notice = 'Compte supprimé. Tu peux continuer hors ligne.'; this.s.game.goto(this.toMenu); },
       onReset: () => { this.s.resetProgress(); this.hud.syncBalance(this.s.wallet.balance); this.loadFloor(HUB_ID); this.toasts.show('Nouvelle partie', 'info'); },
-    }));
+    });
   }
 
   // ---------------------------------------------------------------- interactions
@@ -736,7 +769,11 @@ export class WorldScene implements Scene {
     const p = it.ref as PropDef | undefined;
     const num = p?.id ?? '?';
     const mine = num === this.s.data.cabin.id;
-    if (mine) { this.goInterior('cabin-interior'); return; }
+    if (mine) {
+      if (this.hasCabinKey()) { this.goInterior('cabin-interior'); return; }
+      this.openModal(new InfoDialog(this.s, `Cabine ${num}`, 'C’est ta cabine, mais sa porte est fermée : ta clé t’attend à la réception du hall, avec ton KS Pass Croisière.'));
+      return;
+    }
     // Double de clé d'un ami pour cette porte : la serrure (vérifiée par le serveur) décide
     const key = (this.s.data.keys ?? []).find((k) => !k.master && k.cabin === num && k.owner !== this.s.data.playerId);
     if (key && this.presence) {
@@ -935,24 +972,45 @@ export class WorldScene implements Scene {
     if (eff?.hunger) this.spawnText(this.player.x + 14, this.player.y - 70, `+${eff.hunger} 🍴`, '#ffd166');
   }
 
+  /**
+   * Réception : KS Pass Croisière, KSCoins de bienvenue et clé de la cabine attribuée, remis ensemble par l'autorité
+   * (une seule fois chacun). Une clé manquante (cabine attribuée plus tard) se récupère au même comptoir.
+   */
   private reception(): void {
-    const gift = 'gift:welcome';
-    const already = this.s.wallet.hasProcessed(gift) || !!this.s.data.flags['gift.received'];
-    const text = already
-      ? 'Bon retour à bord ! Casino au 1er, arcade au 2e, ta cabine au 3e et la piscine sur le rooftop. Et la salle des machines (sous-sol) cache peut-être quelque chose…'
-      : `Bienvenue sur KingSea ! Voici ton KS Pass Croisière (accès à tous les ponts) et ${RECEPTION_GIFT} KSCoins de bienvenue pour commencer la croisière.\n\nLe pass est rangé dans ton inventaire. Prends l’ascenseur pour explorer le navire ; le bar est juste à gauche.`;
+    const d = this.s.data;
+    const gift = !!d.flags['gift.received'] || this.s.wallet.hasProcessed('gift:welcome');
+    const key = this.hasCabinKey();
+    const text = !gift
+      ? `Bienvenue sur KingSea ! Voici ton KS Pass Croisière (accès à tous les ponts), ${RECEPTION_GIFT} KSCoins de bienvenue et la clé de ta cabine.\n\nLe pass et la clé sont rangés dans ton trousseau (téléphone → Clés & pass). Ta cabine est au pont des logements, porte à plaque dorée.`
+      : !key
+        ? 'Re-bonjour ! Ta clé de cabine n’avait pas encore été préparée : la voici. Ta cabine est au pont des logements, porte à plaque dorée.'
+        : 'Bon retour à bord ! Casino au 1er, arcade au 2e, ta cabine au 3e et la piscine sur le rooftop. Et la salle des machines (sous-sol) cache peut-être quelque chose…';
+    const action = !gift ? `Recevoir le pass, ${RECEPTION_GIFT} KSCoins et ma clé` : !key ? 'Récupérer ma clé' : 'Merci !';
     this.openModal(new InfoDialog(this.s, 'Réception', text, [{
-      label: already ? 'Merci !' : `Recevoir le KS Pass et ${RECEPTION_GIFT} KSCoins`, style: already ? 'primary' : 'gold',
-      onTap: () => {
-        if (already) return;
-        // Identifiant fixe côté autorité : impossible de le recevoir deux fois
-        void this.s.ask('purser', 'purser', 'gift', {}).then((r) => {
-          this.s.data.flags['gift.received'] = true; this.s.save.markDirty();
-          if (r.ok && (r.view.granted as number) > 0) { this.s.audio.coin(); this.burst(this.player.x, this.player.y - 30, PAL.gold); this.toasts.show(`KS Pass Croisière + ${RECEPTION_GIFT} KSCoins de bienvenue`, 'reward', 4); }
-          else if (!r.ok) this.toasts.show(r.error, 'error');
-        });
-      },
+      label: action, style: gift && key ? 'primary' : 'gold',
+      onTap: () => { if (!(gift && key)) this.claimReception(); },
     }]));
+  }
+
+  private claiming = false;
+  private claimReception(): void {
+    if (this.claiming) return; // double toucher : une seule demande
+    this.claiming = true;
+    // Hors ligne : la cabine est attribuée avant la remise de la clé (en ligne, le serveur s'en charge)
+    if (!this.presence) this.assignLocalCabin();
+    void this.s.ask('purser', 'purser', 'gift', {}).then((r) => {
+      this.claiming = false;
+      if (!r.ok) { this.toasts.show(r.error, 'error'); return; }
+      this.s.data.flags['gift.received'] = true; this.s.save.markDirty();
+      const v = r.view as { granted: number; pass: boolean; key: { name: string; cabin: string } | null; keyNew: boolean; cabin: string | null };
+      const parts = [v.pass ? 'KS Pass Croisière' : '', v.granted > 0 ? `${v.granted} KSCoins` : '', v.keyNew && v.key ? `clé de la cabine ${v.key.cabin}` : ''].filter(Boolean);
+      if (parts.length) {
+        this.s.audio.coin(); this.burst(this.player.x, this.player.y - 30, PAL.gold);
+        this.toasts.show(`Reçu : ${parts.join(' · ')}`, 'reward', 4.5);
+      } else if (!v.key) this.toasts.show('Aucune cabine libre pour le moment : reviens plus tard pour ta clé.', 'info', 4);
+      else this.toasts.show('Tu as déjà tout reçu à la réception.', 'info', 3);
+      this.refreshInteractables();
+    });
   }
 
   private togglePanel(): void {
@@ -1089,6 +1147,7 @@ export class WorldScene implements Scene {
       else if (c.pressed('friends')) this.openFriends();
       else if (c.pressed('floors')) this.openElevator();
       else if (c.pressed('inventory')) this.openInventory();
+      else if (c.pressed('phone')) this.openPhone();
       else if (c.pressed('help')) this.openModal(new ControlsMenu(this.s));
       else if (c.startPressed) this.openSettings();
     } else if (this.modal && c.startPressed) this.modal.close();
@@ -1305,7 +1364,8 @@ export class WorldScene implements Scene {
     this.joystick.render(ctx);
     this.hud.render(ctx, v, this.floor.short, this.floor.name, this.t);
     this.renderChatLog(ctx, v);
-    this.toasts.render(ctx, v);
+    // Sous les soldes, le niveau et les jauges du HUD (et sous la colonne de boutons empilés en portrait)
+    this.toasts.render(ctx, v, v.safe.top + (v.isPortrait ? 112 : 104) * v.ui);
     if (this.s.data.settings.showFps) {
       ctx.fillStyle = PAL.success; ctx.font = font(12, 700); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       ctx.fillText(`${this.s.game.fps} FPS · zoom ${z.toFixed(2)} · dpr ${v.dpr}`, v.safe.left + 12, v.safe.top + 62 * v.ui);

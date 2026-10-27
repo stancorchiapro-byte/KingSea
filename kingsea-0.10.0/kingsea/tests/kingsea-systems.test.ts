@@ -108,6 +108,7 @@ test('KS Pass Croisière et téléphone : remis une fois, personnels, reconnus p
 
 test('clés : principale personnelle, doubles payants, renommage, changement de serrure', () => {
   const s = fresh(1000, '304');
+  ask(s, 'gift'); s.wallet.balance = 1000; // clé principale remise à la réception (avec le KS Pass)
   ask(s, 'keys');
   const master = s.keys!.find((k) => k.master)!;
   assert.ok(master && master.cabin === '304' && master.owner === 'joueur-1');
@@ -134,6 +135,7 @@ test('clés : principale personnelle, doubles payants, renommage, changement de 
   assert.ok(!ask(none, 'key-copy').ok);
   // Solde insuffisant : rien n'est créé
   const poor = fresh(10, '305');
+  ask(poor, 'gift'); poor.wallet.balance = 10;
   const k0 = (ask(poor, 'keys'), poor.keys!.length);
   assert.ok(!ask(poor, 'key-copy').ok);
   assert.equal(poor.keys!.length, k0);
@@ -194,7 +196,7 @@ test('dons d’objets : 2 par 24 h, valeur ≤ 100, objets personnels refusés, 
   assert.equal(giftAllowance(a, t + GIFT_RULES.windowMs + 11).itemsLeft, 2);
   // Clé principale jamais transférable
   const owner = fresh(0, '310');
-  handle(owner, { kind: 'purser', game: 'purser', action: 'keys', input: {}, id: 'k' }, env({ seed: 'proprio' }));
+  handle(owner, { kind: 'purser', game: 'purser', action: 'gift', input: {}, id: 'k' }, env({ seed: 'proprio' }));
   const master = owner.keys!.find((k) => k.master)!;
   assert.throws(() => giveGift(owner, b, { kind: 'key', uid: master.uid }, 'k1', t), /personnelle/);
   assert.ok(owner.keys!.some((k) => k.master), 'la clé principale reste');

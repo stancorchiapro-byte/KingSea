@@ -1,6 +1,29 @@
-# État du projet — version 0.14 (refonte du casino, éditeur : Stan)
+# État du projet — version 0.15 (mise à jour complète, éditeur : Stan)
 
 > **Non publié.** Tout ce qui pouvait être préparé sans appareils, sans SDK natifs et sans comptes développeur l'est ; le reste est listé dans [PUBLISHING.md](PUBLISHING.md).
+
+## Mise à jour complète (version 0.15, éditeur Stan)
+- **Gains du casino non crédités : cause trouvée et corrigée.** Aux tables partagées, l'identifiant de transaction
+  d'une manche (`table:<table>#<n>:<manche>:<joueur>`) repartait de la manche 1 quand une table était recréée ou que
+  le serveur redémarrait. L'historique des transactions étant une fenêtre glissante (400), la mise ancienne en sortait
+  avant le gain : la nouvelle mise était acceptée, puis son gain ignoré comme « déjà versé ». Corrigé à la source
+  (identifiant unique par instance de table) et par deux gardes de l'autorité (identifiant de manche neuf exigé,
+  crédit qui refuse au lieu d'ignorer). Même fenêtre glissante : jetons de bienvenue et cadeau de la réception
+  pouvaient être reversés — désormais mémorisés par drapeau. Reproduit par un test qui échouait avant la correction.
+- **Blackjack** : cartes A, 2–10, J, Q, K définies une seule fois (rang, libellé, nom, valeur) ; séparation des 13
+  paires et de deux cartes valant 10 de rangs différents (règle documentée) ; état explicite des mains ; règlement
+  unique ; tests de règles et de soldes à chaque étape.
+- **Téléphone KS** façon smartphone, en ligne comme hors ligne (touche P) : barre d'état (heure du téléphone, réseau
+  du navire), écran d'accueil à 11 applications, retour « ‹ », barre d'accueil, animations. Messages, Contacts,
+  Cadeaux (serveur), Ma cabine, Plan du navire (déplacement réel), Portefeuille (soldes de l'autorité, relevé des
+  jetons de la session), Clés & pass, et Inventaire / Missions / Niveaux / Réglages (menus du jeu, retour au téléphone).
+- **Réception** : la clé de la cabine est remise avec le KS Pass et les KSCoins (une seule fois chacun ; cabine
+  attribuée au besoin ; clé manquante récupérable au même comptoir) ; sa propre cabine ne s'ouvre qu'avec la clé
+  (vérifié aussi par le serveur). Les clés déjà détenues par les profils existants sont conservées.
+- **Lisibilité** : texte jamais sous 11 px, libellés de boutons réduits ou sur deux lignes au lieu d'être écrasés,
+  réglages en portrait aérés (deux options par ligne), cartes du passe sans chevauchement, notifications sous le HUD,
+  bouton de tri de l'inventaire à 44 px ; l'audit couvre maintenant le téléphone, les niveaux, l'inventaire, les
+  missions et, avec le KS Pass, tous les mini-jeux des ponts.
 
 ## Refonte du casino (version 0.14, éditeur Stan)
 - **Blackjack multi-mains** : 1 à 5 mains principales par manche (boutons 1–5), mise indépendante par main (bornes de la table vérifiées main par main), total vérifié avant la distribution, une seule opération de mise ; assurance proposée main par main ; séparations jusqu'à 4 mains par case ; récapitulatif par main (mise totale, résultat, net) + total misé / retourné / bilan net / solde avant → après. Tables partagées en ligne : plusieurs places par joueur dans la limite des 5 places (une place gardée par joueur assis). Règles détaillées : [CASINO_RULES.md](CASINO_RULES.md).

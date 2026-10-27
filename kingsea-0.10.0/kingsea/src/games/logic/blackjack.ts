@@ -44,11 +44,13 @@ export interface BjRules {
   maxHands: number;
   doubleAfterSplit: boolean;
   resplitAces: boolean;
+  /** Deux cartes valant 10 (10, valet, dame, roi) forment une paire séparable, même de rangs différents. */
+  splitTenValues: boolean;
   /** Assurance proposée quand le croupier montre un As. */
   insurance: boolean;
 }
 
-export const BJ_RULES: BjRules = { decks: 6, standSoft17: true, blackjackPays: 1.5, naturalBonus: 0.5, maxHands: 4, doubleAfterSplit: true, resplitAces: false, insurance: true };
+export const BJ_RULES: BjRules = { decks: 6, standSoft17: true, blackjackPays: 1.5, naturalBonus: 0.5, maxHands: 4, doubleAfterSplit: true, resplitAces: false, splitTenValues: true, insurance: true };
 
 /** Bonus KingSea sur un blackjack naturel : 50 % de la mise initiale, en plus du paiement 3:2. */
 export const NATURAL_BONUS = BJ_RULES.naturalBonus;
@@ -61,7 +63,7 @@ export function rulesText(r: BjRules = BJ_RULES): string[] {
     'Le croupier vérifie son blackjack quand il montre un As ou un 10.',
     ...(r.insurance ? ['Assurance proposée sur un As du croupier : moitié de la mise au plus, payée 2:1.'] : []),
     `Doubler sur les deux premières cartes${r.doubleAfterSplit ? ', y compris après une séparation' : ''}.`,
-    `Séparer les paires de même rang jusqu’à ${r.maxHands} mains ; As séparés : une carte chacun${r.resplitAces ? '' : ', sans nouvelle séparation'}.`,
+    `Séparer une paire (deux cartes de même rang${r.splitTenValues ? ', ou deux cartes valant 10 : 10, valet, dame, roi' : ''}) jusqu’à ${r.maxHands} mains ; As séparés : une carte chacun${r.resplitAces ? '' : ', sans nouvelle séparation'}.`,
     'Égalité : mise rendue. Au-delà de 21 : main perdue.',
   ];
 }
@@ -84,6 +86,18 @@ export function naturalPayout(bet: number, r: BjRules = BJ_RULES): { base: numbe
 export const insuranceCost = (bet: number): number => Math.floor(bet / 2);
 
 const tenValue = (c: Card) => c.rank === 1 || c.rank >= 10;
+
+/** Deux cartes forment-elles une paire séparable selon les règles de la table ? */
+export function isPair(a: Card, b: Card, r: BjRules = BJ_RULES): boolean {
+  return a.rank === b.rank || (r.splitTenValues && a.rank >= 10 && b.rank >= 10);
+}
+
+/** État explicite d'une main : en cours de jeu, terminée en attente du croupier, ou réglée (résultat et paiement fixés). */
+export type HandState = 'en-cours' | 'attente-croupier' | 'reglee';
+export function handState(h: Hand, phase: Phase): HandState {
+  if (h.outcome !== undefined && phase === 'settled') return 'reglee';
+  return h.done ? 'attente-croupier' : 'en-cours';
+}
 
 export interface BlackjackSnapshot { phase: Phase; hands: Hand[]; dealer: Card[]; active: number; shoe: Card[]; insurance?: Record<number, Insurance>; seats?: number }
 
@@ -194,7 +208,7 @@ export class Blackjack {
   }
   canSplit(): boolean {
     const h = this.current;
-    if (this.phase !== 'player' || !h || h.done || h.cards.length !== 2 || h.cards[0].rank !== h.cards[1].rank) return false;
+    if (this.phase !== 'player' || !h || h.done || h.cards.length !== 2 || !isPair(h.cards[0], h.cards[1], this.rules)) return false;
     if (h.splitAces && !this.rules.resplitAces) return false;
     return this.seatHands(h.seat ?? 0).length < this.rules.maxHands;
   }
@@ -261,6 +275,8 @@ export class Blackjack {
   }
 
   private settle(): void {
+    // Une manche n'est réglée qu'une fois : résultats et paiements ne sont jamais recalculés
+    if (this.phase === 'settled') return;
     const d = handValue(this.dealer).total;
     const dealerBJ = isBlackjack(this.dealer);
     for (const h of this.hands) {

@@ -12,6 +12,15 @@ universelles ; chaque choix est indiqué. Toutes les mises sont en **jetons de c
 - Chaque mouvement de jetons porte un identifiant de transaction unique (`…:mise`, `…:gain`, `…:double:…`, `…:split:…`,
   `…:assurance…`) : une requête rejouée (double clic, reconnexion) n'est ni débitée ni payée deux fois.
 - Opérations atomiques (`transact`) : en cas d'erreur, l'état est restauré (aucun jeton créé ni perdu).
+- **Identifiant de manche neuf obligatoire** : une manche n'est ouverte que si ni sa mise, ni son gain, ni un
+  remboursement ne sont déjà enregistrés sous cet identifiant ; le gain est versé par `chips.credit`, qui refuse
+  (et annule la manche) au lieu d'ignorer un gain en silence. Aux tables partagées, l'identifiant contient celui de
+  l'instance de table (unique, même après un redémarrage du serveur).
+- **Versements uniques par drapeau** : jetons de bienvenue (`chips.welcome`) et cadeau de la réception
+  (`gift.received`) ne dépendent plus de l'historique de transactions, qui est une fenêtre glissante de 400 entrées.
+- Convention comptable : la mise est débitée à la distribution (et chaque supplément au moment du double, de la
+  séparation ou de l'assurance) ; au règlement, le **retour** (mise comprise) est crédité ; le **net** = retour − mise.
+  Victoire 1:1 : retour 2× la mise ; égalité : retour = mise ; défaite : retour 0.
 - Hors ligne, l'autorité tourne dans l'application (LocalBackend) : elle protège contre les erreurs et les doubles
   actions, **pas** contre un joueur qui modifierait son propre appareil. En ligne, le serveur est la seule autorité.
 - « Retour » = montant total rendu au joueur (mise comprise) ; « net » = retour − mise. Les deux sont affichés séparément.
@@ -29,11 +38,17 @@ universelles ; chaque choix est indiqué. Toutes les mises sont en **jetons de c
 | Blackjack naturel | payé 3:2 (arrondi inférieur) **+ bonus maison KingSea de 50 %** de la mise, affiché séparément |
 | 21 après séparation | pas un blackjack : payé 1:1 |
 | Doubler | sur deux cartes, y compris après séparation ; une seule carte (face visible ou cachée au choix) ; mise supplémentaire égale prélevée au moment du double |
-| Séparer | paires de même rang, **jusqu'à 4 mains par case** ; mise supplémentaire égale prélevée à chaque séparation ; As séparés : une carte chacun, pas de re-séparation |
+| Séparer | paires de même rang (2-2 … 10-10, J-J, Q-Q, K-K, A-A) **et deux cartes valant 10 de rangs différents** (10-J, Q-K…, règle `splitTenValues`), **jusqu'à 4 mains par case** ; mise supplémentaire égale prélevée à chaque séparation ; As séparés : une carte chacun, pas de re-séparation |
 | Égalité | mise rendue (net 0) |
 | Dépassement de 21 | main perdue immédiatement, même si le croupier dépasse ensuite |
 | Tables | Débutant 5–100, Standard 25–500, Premium 100–2 000 (niv. 3), VIP 500–5 000 (niv. 5) — limites par main |
 | En ligne | 5 places par table ; un joueur peut occuper plusieurs places libres, une place restant gardée pour chaque joueur assis ; 20 s par décision puis « Rester » automatique |
+
+Cartes : 4 enseignes (♠ ♥ ♦ ♣), 13 valeurs A, 2–10, J, Q, K définies une seule fois (`RANKS` dans
+`src/games/logic/cards.ts` : rang, libellé, nom, valeur au blackjack). L'As vaut 11, ou 1 si 11 ferait dépasser 21.
+États d'une main (`handState`) : `en-cours`, `attente-croupier` (main terminée, croupier pas encore joué), `reglee`
+(résultat et paiement fixés, jamais recalculés). Le croupier ne tire pas si toutes les mains ont déjà dépassé 21.
+L'abandon (« surrender ») n'existe pas dans cette variante.
 
 Ordre de jeu : les mains sont jouées de gauche à droite ; une main séparée est jouée entièrement avant de passer à la
 suivante. Une action hors tour, sur une main terminée, ou rejouée est refusée par l'autorité. Le règlement est fait main par main ;

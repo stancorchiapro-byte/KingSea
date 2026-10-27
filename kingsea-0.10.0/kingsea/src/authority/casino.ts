@@ -5,7 +5,7 @@
 // Jeux en plusieurs étapes (blackjack, poker, courses, Crash) : une « session » secrète est conservée ;
 // si le joueur disparaît, abandonSession() la termine selon la règle de table.
 import { bacSettle, playBaccarat, type BacBet } from '../games/logic/baccarat';
-import { BJ_TABLES, Blackjack, insuranceCost, type BjTable, type Hand } from '../games/logic/blackjack';
+import { BJ_TABLES, Blackjack, handState, insuranceCost, type BjTable, type Hand } from '../games/logic/blackjack';
 import { hiLo, Shoe, type Card } from '../games/logic/cards';
 import { crapsSettle, playCraps, type CrapsBet } from '../games/logic/craps';
 import { crashMultiplier, crashPoint, crashReturn, timeToReach } from '../games/logic/crash';
@@ -26,8 +26,9 @@ export const CASINO_GAMES = ['roulette', 'slots', 'baccarat', 'craps', 'keno', '
 // ---------------------------------------------------------------- outils
 function settleNow(s: AuthState, game: string, reqId: string, stake: number, payout: number, env: AuthEnv): string {
   const tx = `${game}:${reqId}`;
+  if (!chips.fresh(s, tx)) throw new AuthError('Requête déjà traitée');
   chips.spend(s, stake, `${tx}:mise`);
-  chips.earn(s, Math.floor(payout), `${tx}:gain`);
+  chips.credit(s, Math.floor(payout), `${tx}:gain`);
   incStat(s, `plays.${game}`);
   onRound(s, game, env); // XP et missions (manche terminée)
   return tx;
@@ -36,6 +37,8 @@ function settleNow(s: AuthState, game: string, reqId: string, stake: number, pay
 function open(s: AuthState, game: string, reqId: string, stake: number, data: Record<string, unknown>, env: AuthEnv): Session {
   if (s.sessions[game] && s.sessions[game].stake > 0) throw new AuthError('Une manche est déjà en cours');
   const tx = `${game}:${reqId}`;
+  // Identifiant neuf obligatoire : une mise acceptée doit toujours pouvoir recevoir son gain
+  if (!chips.fresh(s, tx)) throw new AuthError('Requête déjà traitée');
   if (stake > 0) chips.spend(s, stake, `${tx}:mise`);
   const sess: Session = { game, tx, stake, at: env.now, data };
   s.sessions[game] = sess;
@@ -46,7 +49,7 @@ function open(s: AuthState, game: string, reqId: string, stake: number, data: Re
 function close(s: AuthState, game: string, payout: number, env: AuthEnv): void {
   const sess = s.sessions[game];
   if (!sess) return;
-  chips.earn(s, Math.floor(payout), `${sess.tx}:gain`);
+  chips.credit(s, Math.floor(payout), `${sess.tx}:gain`);
   delete s.sessions[game];
   if (sess.stake > 0) onRound(s, game, env); // XP et missions (manche terminée)
 }
@@ -111,7 +114,7 @@ const handCardsShown = (h: Hand, settled: boolean): Hand['cards'] => (h.hiddenDo
 /** Vue publique : la carte cachée du croupier, celle d'un double face cachée et le sabot ne sont jamais envoyés. */
 export function blackjackView(g: Blackjack, shoe: ShoeState, hilo: boolean): Record<string, unknown> {
   const hidden = g.dealerHoleHidden, settled = g.phase === 'settled';
-  const hands = g.hands.map((h) => ({ ...h, cards: handCardsShown(h, settled) }));
+  const hands = g.hands.map((h) => ({ ...h, cards: handCardsShown(h, settled), state: handState(h, g.phase) }));
   const visible = [...hands.flatMap((h) => h.cards).filter((c) => c.rank > 0), ...g.dealer.filter((_, i) => !(hidden && i === 1))];
   return {
     phase: g.phase, active: g.active, hands,
@@ -377,7 +380,11 @@ export function abandonSession(s: AuthState, game: string, env: AuthEnv): number
       default: payout = 0;
     }
   } catch { payout = sess.stake; } // état illisible : mise rendue
-  close(s, game, payout, env);
+  // Appelé hors transaction (démarrage, déconnexion) : jamais d'exception, et le gain dû est toujours versé
+  try { close(s, game, payout, env); } catch (e) {
+    console.error('[KingSea] règlement de manche interrompue', e);
+    chips.earn(s, Math.floor(payout), `${sess.tx}:gain:reprise`);
+  }
   delete s.sessions[game];
   return Math.floor(payout);
 }

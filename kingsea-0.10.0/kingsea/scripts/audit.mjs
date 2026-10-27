@@ -110,7 +110,8 @@ for (const prof of profiles) {
     await audit('avertissement d’âge'); await shot('age');
     await ev(`(() => { localStorage.setItem('kingsea.ageOk', '1'); window.__ksMenu.modal?.close(); })()`); await sleep(300);
     // Profil prêt, puis jeu hors ligne
-    await ev(`(() => { const s = window.__ksApp.services; s.data.name = 'Audit'; s.data.flags['profile.done'] = true; })()`);
+    // KS Pass (reçu à la réception) : sans lui, les ponts du casino, de l'arcade… restent fermés et leurs jeux ne seraient pas audités
+    await ev(`(() => { const s = window.__ksApp.services; s.data.name = 'Audit'; s.data.flags['profile.done'] = true; s.data.flags['gift.received'] = true; s.data.inventory ??= { items: {} }; s.data.inventory.items['ks-pass'] = 1; })()`);
     await ev(`window.__ksMenu.layer.buttons.find((b) => b.id === 'play').onTap()`);
     if (!(await waitScene('WorldScene'))) throw new Error('monde non chargé');
     await sleep(500);
@@ -122,6 +123,18 @@ for (const prof of profiles) {
     await ev(`window.__ks.scene.loadFloor('hub', true)`); await sleep(300);
     await ev(`window.__ks.scene.openElevator()`); await sleep(400); await audit('ascenseur'); await shot('ascenseur');
     await ev(`window.__ks.scene.modal?.close()`); await sleep(300);
+    // Téléphone : écran d'accueil et chaque application interne
+    for (const app of ['home', 'messages', 'contacts', 'gifts', 'cabin', 'map', 'wallet', 'keys']) {
+      await ev(`window.__ks.scene.openPhone({ app: '${app}' })`); await sleep(350);
+      await audit(`téléphone/${app}`); await shot(`telephone-${app}`);
+      await ev(`window.__ks.scene.modal?.close()`); await sleep(250);
+    }
+    await ev(`window.__ks.scene.hud.levelBtn.onTap()`); await sleep(350); await audit('niveaux & passe'); await shot('niveaux');
+    await ev(`window.__ks.scene.modal?.close()`); await sleep(250);
+    await ev(`window.__ks.scene.openInventory()`); await sleep(350); await audit('inventaire'); await shot('inventaire');
+    await ev(`window.__ks.scene.modal?.close()`); await sleep(250);
+    await ev(`window.__ks.scene.openMissions()`); await sleep(350); await audit('missions'); await shot('missions');
+    await ev(`window.__ks.scene.modal?.close()`); await sleep(250);
     const hud = await ev(`Object.keys(window.__ks.scene.hud).filter((k) => /Btn$/.test(k))`);
     if (hud.includes('settingsBtn')) { await ev(`window.__ks.scene.hud.settingsBtn.onTap()`); await sleep(400); await audit('monde/paramètres'); await ev(`window.__ks.scene.modal?.close()`); await sleep(300); }
     // Chaque mini-jeu (une fois par type), lancé comme si le joueur interagissait

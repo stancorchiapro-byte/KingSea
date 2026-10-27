@@ -279,8 +279,11 @@ export class GameServer {
         // Même requête renvoyée après une coupure : même réponse, rien n'est rejoué
         const cached = c.replies.get(req.id);
         if (cached) { this.send(c, { t: 'res', id: req.id, reply: cached }); return; }
+        // Réception : la cabine est attribuée (si besoin) avant la remise de sa clé avec le KS Pass
+        const giftCabin = req.kind === 'purser' && req.action === 'gift' && !p.cabin.id ? this.assignCabin(p) : null;
         const reply = handle(p, req, { ...this.env(), seed: p.id, online: true });
         this.store.save(p);
+        if (giftCabin) this.send(c, { t: 'cabin', id: p.cabin.id, wallColor: p.cabin.wallColor });
         c.replies.set(req.id, reply);
         // Machines (banc partagé) : les voisins voient le résultat, jamais la mise d'avant tirage
         if (reply.ok && req.kind === 'casino' && reply.done && reply.stake + reply.payout > 0) this.tables.personalResult(p.id, req.game, reply.payout - reply.stake, GAME_LABELS[req.game] ?? req.game);
@@ -289,12 +292,7 @@ export class GameServer {
         return;
       }
       case 'cabin': {
-        let id = p.cabin.id;
-        if (!id) {
-          id = this.cabins.assign(p.id);
-          if (id && !this.store.setCabin(id, p.id)) { this.cabins.release(p.id); id = null; }
-          if (id) { p.cabin.id = id; ensureMasterKey(p, p.id); this.store.save(p); }
-        }
+        const id = p.cabin.id ?? this.assignCabin(p);
         this.send(c, { t: 'cabin', id, wallColor: p.cabin.wallColor });
         return;
       }
@@ -590,6 +588,14 @@ export class GameServer {
     this.send(c, { t: 'visitReply', ok: true, msg: `Ding-dong ! Tu as sonné chez ${op.name}. En attente de réponse…` });
   }
 
+  /** Attribue une cabine libre (une seule par passager) ; sa clé n'est remise qu'à la réception. */
+  private assignCabin(p: ServerProfile): string | null {
+    let id = this.cabins.assign(p.id);
+    if (id && !this.store.setCabin(id, p.id)) { this.cabins.release(p.id); id = null; }
+    if (id) { p.cabin.id = id; ensureMasterKey(p, p.id); this.store.save(p); }
+    return id;
+  }
+
   /** Accès à la cabine de `owner` pour `visitor` : propriétaire, invitation acceptée ou double de clé à jour. */
   private cabinAccess(visitor: AuthState & { id: string }, owner: string): { ok: true; cabin: string; prof: ServerProfile } | { ok: false; msg: string } {
     const live = this.byAccount.get(owner)?.profile;
@@ -763,6 +769,8 @@ export class GameServer {
     if (floor === 'cabin-interior') {
       owner = typeof cabinOwner === 'string' && cabinOwner ? cabinOwner : p.id;
       if (owner === p.id && !p.cabin.id) { this.send(c, { t: 'notice', msg: 'Tu n’as pas encore de cabine.' }); return; }
+      // Sa propre cabine s'ouvre avec sa clé principale, remise à la réception (profils antérieurs : clé déjà détenue)
+      if (owner === p.id) { ensureEconomy(p); ensureMasterKey(p, p.id); if (!(p.keys ?? []).some((k) => k.master)) { this.send(c, { t: 'evict', msg: 'Ta clé de cabine t’attend à la réception du hall.' }); return; } }
       const a = this.cabinAccess(p, owner);
       if (!a.ok) { this.send(c, { t: 'evict', msg: a.msg }); return; }
       room = `cabin:${a.cabin}`; // chaque cabine est une instance privée : son propriétaire et ses invités

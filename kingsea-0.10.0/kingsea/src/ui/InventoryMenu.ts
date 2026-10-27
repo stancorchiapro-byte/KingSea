@@ -224,7 +224,7 @@ export class InventoryMenu extends Modal {
     this.detail = wide ? { x: C.x + C.w * 0.56 + 12 * ui, y: top, w: C.w * 0.44 - 12 * ui, h: H } : { x: C.x, y: top + H * 0.5 + 10 * ui, w: C.w, h: H * 0.5 - 10 * ui };
     if (this.tab !== 'chips') {
       // Tri (cycle) et pages
-      const sh = Math.max(36, 34 * ui);
+      const sh = Math.max(44, 40 * ui); // zone tactile ≥ 44 px
       out.push(makeButton({ id: 'inv-sort', label: `Tri : ${this.sort}`, style: 'ghost', fontSize: 12, x: this.grid.x, y: this.grid.y, w: Math.min(150 * ui, this.grid.w * 0.45), h: sh,
         onTap: () => { this.sort = lastSort = this.sort === 'rareté' ? 'nom' : this.sort === 'nom' ? 'quantité' : 'rareté'; this.relayout(); } }));
       const cell = Math.max(64, Math.min(92 * ui, (this.grid.w - gap * 3) / 4)), cols = Math.max(1, Math.floor((this.grid.w + gap) / (cell + gap)));

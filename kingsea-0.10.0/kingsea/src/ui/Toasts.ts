@@ -23,9 +23,10 @@ export class Toasts {
     this.list = this.list.filter((t) => t.t < t.dur);
   }
 
-  render(ctx: CanvasRenderingContext2D, vp: Viewport): void {
+  /** `top` : haut de la pile, sous les éléments fixes de la scène (HUD, en-tête) pour ne jamais les recouvrir. */
+  render(ctx: CanvasRenderingContext2D, vp: Viewport, top = vp.safe.top + 62 * vp.ui): void {
     const ui = vp.ui;
-    let y = vp.safe.top + 62 * ui;
+    let y = top;
     for (const t of this.list) {
       const a = Math.min(1, t.t * 6, (t.dur - t.t) * 3);
       ctx.save(); ctx.globalAlpha = a;

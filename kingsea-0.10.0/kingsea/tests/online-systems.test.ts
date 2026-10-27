@@ -347,3 +347,34 @@ test('blackjack partagé : plusieurs mains par joueur dans la limite de 5 places
   assert.equal(w.chips(a.id), 1000 - pa.stake + pa.payout, 'Multi : total des trois mains, versé une fois');
   assert.equal(w.chips(b.id), 1000 - pb.stake + pb.payout);
 });
+
+test('tables : après un redémarrage du serveur (manches renumérotées depuis 1), aucun identifiant de transaction n’est réutilisé — chaque gain est versé', () => {
+  const w = world();
+  const a = w.join('Rejoue');
+  w.chips(a.id, 1000);
+  a.say({ t: 'tableJoin', game: 'blackjack', tier: 'debutant' });
+  const playOnce = () => {
+    // Main gagnante imposée (20 contre 17) : le gain doit être versé à chaque fois
+    const t = w.server.tables.tableOf(a.id) as unknown as { shoe: { stack(c: unknown[]): void } };
+    t.shoe.stack([{ rank: 10, suit: '♠' }, { rank: 10, suit: '♥' }, { rank: 13, suit: '♦' }, { rank: 7, suit: '♣' }]);
+    const before = w.chips(a.id);
+    const r = a.bet({ bets: [10] });
+    assert.ok(r.ok, `mise acceptée : ${r.error ?? ''}`);
+    w.advance(BJ_TURN_MS * 3 + 15_000);
+    const round = a.sock.take('tableRound').at(-1)!;
+    const me = (round.players as Array<{ id: string; stake: number; payout: number }>).find((x) => x.id === a.id)!;
+    assert.equal(me.payout, 20, 'main gagnante : 10 misés, 20 rendus');
+    assert.equal(w.chips(a.id), before - me.stake + me.payout, `solde = avant − mise + retour (mise ${me.stake}, retour ${me.payout})`);
+  };
+  playOnce();
+  for (let i = 0; i < 4; i++) {
+    // Redémarrage simulé : toutes les tables disparaissent et sont recréées (table n° 1, manche 1) ; l'historique
+    // glissant du joueur a déjà perdu la mise ancienne mais garde encore son gain
+    a.say({ t: 'tableLeave' });
+    (w.server.tables as unknown as { tables: Map<string, unknown> }).tables.clear();
+    w.server.withProfile(a.id, (p) => { p.chips!.processedTx = p.chips!.processedTx.filter((x) => !x.endsWith(':mise')); });
+    a.say({ t: 'tableJoin', game: 'blackjack', tier: 'debutant' });
+    assert.equal(lastTable(a.sock)!.num, 1, 'table recréée sous le même numéro');
+    playOnce();
+  }
+});
